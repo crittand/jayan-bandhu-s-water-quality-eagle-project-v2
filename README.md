@@ -52,3 +52,26 @@ python3 download_esmr_usgs_history.py usgs     # just USGS
 ```
 
 These save to `Raw_data/esmr/` and `Raw_data/usgs/`. The **Historical Analysis** tab lets you pick any combination of CEDEN, eSMR (Dry Creek WWTP, Pleasant Grove WWTP), and USGS. DCC's own JBDC01/JBDC02 sampling stays on the monitoring tabs.
+
+## 📍 Adding partner data (new sites or more samples)
+
+The **📤 Upload Data** tab has two modes:
+
+- **🔍 Explore a file (not saved)**: anyone can chart a CSV. Nothing is stored.
+- **📥 Add data to the dashboard (partners)**: an organization signs in with its passcode and uploads a CSV for **new sites** or **more samples on its own sites**. It's saved and shows up on the **📍 Monitoring Sites** tab right away. New JBDC01 / JBDC02 samples also show up on the Dry creek / Miners Ravine tabs.
+
+How it's checked: column names are matched automatically (and can be fixed by hand), °F temperatures can be converted, impossible values (wrong units) are removed, rows for a site + date that already exist are skipped, and organizations can only add to their own sites. New sites need a name and latitude/longitude.
+
+Where it's stored:
+
+- `Raw_data/community/sites.csv`: every registered site
+- `Raw_data/community/samples/<organization>_<timestamp>.csv`: one file per upload
+- The original field data in `Raw_data/original/` is never changed.
+
+### Setup (once)
+
+1. Copy `.streamlit/secrets.toml.example` and fill in a passcode for each organization.
+   - Local: save it as `.streamlit/secrets.toml` (it's git-ignored).
+   - Streamlit Cloud: app ⋮ menu → **Settings → Secrets**, paste it in.
+2. **For uploads to be permanent on Streamlit Cloud**, add the `[github]` section with a GitHub *fine-grained personal access token* limited to this repo with **Contents: Read and write**. Each upload is then committed to the repo, and Streamlit Cloud redeploys with it (the app restarts for a few seconds). Without the token, uploads only last until the app restarts.
+3. Give each organization its passcode. To remove an organization, delete its line from the secrets.
