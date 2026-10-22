@@ -29,7 +29,7 @@ except ImportError:
 matplotlib.use("Agg")
 
 st.set_page_config(
-    page_title="Dry Creek Water Quality Monitoring | Eagle Project & Dry Creek Conservancy",
+    page_title="Dry Creek Water Quality Monitoring | Dry Creek Conservancy",
     page_icon="💧",
     layout="wide",
 )
@@ -163,7 +163,7 @@ def discover_ceden_historical_tables(package_id: str = "surface-water-chemistry-
     }
     try:
         url = f"{CKAN_API_BASE}/package_show?id={urllib.parse.quote(package_id)}"
-        req = urllib.request.Request(url, headers={"User-Agent": "DryCreekEagleProject/2.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "DryCreekConservancyDashboard/2.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
         resources = payload.get("result", {}).get("resources", [])
@@ -196,7 +196,7 @@ def fetch_live_ceden_ckan_stdlib(resource_id: str) -> pd.DataFrame:
         f") LIMIT 2500"
     )
     url = f"{CKAN_API_BASE}/datastore_search_sql?sql=" + urllib.parse.quote(sql)
-    req = urllib.request.Request(url, headers={"User-Agent": "DryCreekEagleProject/2.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "DryCreekConservancyDashboard/2.0"})
     with urllib.request.urlopen(req, timeout=15) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
     records = payload.get("result", {}).get("records", [])
@@ -228,10 +228,30 @@ def harvest_multiyear_roseville_history(resource_map: dict[str, str]) -> pd.Data
     return pd.concat(frames, ignore_index=True)
 
 
-# --- Load Primary Eagle Project CSVs ---
-qpcr = pd.read_csv(BASE_DIR / "Raw_data" / "QPCR.csv")
-data = pd.read_csv(BASE_DIR / "Raw_data" / "Waterquality.csv")
-ceden_bench_df = get_roseville_ceden_benchmark()
+# --- Load the real field + lab data ---
+# These are the original files from the first GitHub repo, kept unchanged in Raw_data/original/.
+# The app only reads them. (The older demo CSVs in Raw_data/ are not used.)
+REAL_DATA_DIR = BASE_DIR / "Raw_data" / "original"
+qpcr = pd.read_csv(REAL_DATA_DIR / "QPCR.csv")
+data = pd.read_csv(REAL_DATA_DIR / "Waterquality.csv").dropna(how="all")
+data.columns = data.columns.str.strip()
+
+# Jonah Ventures assay codes -> readable names
+ASSAY_NAMES = {
+    "NZMudSnail": "New Zealand Mudsnail (Potamopyrgus antipodarum)",
+    "AsianClam": "Asian Clam (Corbicula fluminea)",
+    "Corbicula": "Asian Clam (Corbicula fluminea)",
+}
+
+
+def assay_species(code: str) -> str:
+    for prefix, name in ASSAY_NAMES.items():
+        if str(code).lower().startswith(prefix.lower()):
+            return name
+    return str(code)
+
+
+qpcr["Species"] = qpcr["Assay"].apply(assay_species)
 
 
 # --- Alert Checker (Preserved & Wired Up) ---
@@ -446,19 +466,19 @@ def pdf_download(prompt: str, miners_ravine: pd.DataFrame, dry_creek: pd.DataFra
             st.pyplot(fig3)
 
 
-# --- Convert Eagle Project Data to Official CEDEN 2.0 Schema ---
-def convert_eagle_to_ceden2(df: pd.DataFrame) -> pd.DataFrame:
+# --- Convert Monitoring Data to Official CEDEN 2.0 Schema ---
+def convert_samples_to_ceden2(df: pd.DataFrame) -> pd.DataFrame:
     """Transforms JBDC01 / JBDC02 rows into standard 17-column CEDEN 2.0 submission format."""
     station_lookup = {
         "JBDC01": {
             "StationCode": "519MINR_JBDC01",
-            "StationName": "Miners Ravine — Eagle Project Station JBDC01 (Roseville)",
+            "StationName": "Miners Ravine — DCC Monitoring Station JBDC01 (Roseville)",
             "Lat": 38.752945,
             "Lon": -121.241526,
         },
         "JBDC02": {
             "StationCode": "519DRYC_JBDC02",
-            "StationName": "Dry Creek at Saugstad Park — Eagle Project Station JBDC02 (Roseville)",
+            "StationName": "Dry Creek at Saugstad Park — DCC Monitoring Station JBDC02 (Roseville)",
             "Lat": 38.742738,
             "Lon": -121.284156,
         },
@@ -482,9 +502,9 @@ def convert_eagle_to_ceden2(df: pd.DataFrame) -> pd.DataFrame:
             if col_key in row and pd.notna(row[col_key]):
                 ceden_rows.append(
                     {
-                        "Program": "Dry Creek Conservancy & Eagle Scout Citizen Science",
+                        "Program": "Dry Creek Conservancy Citizen Science Monitoring",
                         "ParentProject": "CEDEN_Dry_Creek_Watershed_Roseville",
-                        "Project": "Jayan Bandhu Eagle Scout Water Quality Project",
+                        "Project": "Dry Creek Conservancy Water Quality Monitoring",
                         "StationCode": st_meta["StationCode"],
                         "StationName": st_meta["StationName"],
                         "SampleDate": sample_dt,
@@ -505,11 +525,11 @@ def convert_eagle_to_ceden2(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # --- Main Layout & Optional CSV Uploader ---
-st.title("💧 Dry Creek Water Quality Monitoring Project")
+st.title("💧 Dry Creek Water Quality Monitoring")
 st.caption(
-    "Jayan Bandhu's Boy Scout Eagle Project supporting the **Dry Creek Conservancy (DCC)** — "
+    "A **Dry Creek Conservancy (DCC)** dashboard for staff, volunteers, and funding sponsors — "
     "Monthly **Physiochemical Monitoring** (equipment loaned from **Sierra Streams Institute**) & **eDNA** "
-    "(**CALeDNA Lab at UCSC / eDNA Explorer** BMI Metabarcoding + **Jonah Ventures** Invasive Species qPCR) + **CEDEN 2.0**"
+    "(**CALeDNA Lab at UCSC / eDNA Explorer** BMI Metabarcoding + **Jonah Ventures** Invasive Species qPCR)"
 )
 
 reqcols = ["DO", "SPC", "Turbidity", "Water Temp", "PH", "Site"]
@@ -523,16 +543,19 @@ with st.sidebar:
         "Miners Ravine",
         "Comparative analysis",
         "Correlation analysis",
-        "PDF Download",
+        "PDF & Data Download",
         "eDNA results",
         "Simulation",
-        "CEDEN 2.0 & Roseville Creeks",
+        "Upload Your Own Data",
+        "Historical Analysis (CEDEN)",
     ]
-    selected_tab = st.radio(
-        "Select Tab",
-        tab_names,
-        index=min(st.session_state.active_tab, len(tab_names) - 1),
-    )
+    # the map on the Overview tab sets pending_tab when a marker is clicked
+    if "pending_tab" in st.session_state:
+        st.session_state.nav_tab = tab_names[st.session_state.pop("pending_tab")]
+    if st.session_state.get("nav_tab") not in tab_names:
+        st.session_state.nav_tab = tab_names[0]
+    # using a key (instead of index=) so one click always switches the tab
+    selected_tab = st.radio("Select Tab", tab_names, key="nav_tab")
     st.session_state.active_tab = tab_names.index(selected_tab)
 
     st.divider()
@@ -591,22 +614,31 @@ dry_creek = dry_creek.sort_values("Date")
 if selected_tab == "Overview":
     st.header("🌊 Water Quality Dashboard for the Dry Creek Watershed (Roseville, CA)")
 
-    # Easy-to-understand introduction banner connecting to Dry Creek Conservancy (DCC) & README architecture
+    # Easy-to-understand introduction banner about the Dry Creek Conservancy (DCC) monitoring program
     st.info(
-        "🌲 **What Is This Boy Scout Eagle Project & How Does It Support the Dry Creek Conservancy (DCC)?**\n\n"
+        "🌲 **About This Dashboard**\n\n"
         "- **Who is the Dry Creek Conservancy (DCC)?** Founded in 1995, the **Dry Creek Conservancy** is a local Roseville "
         "501(c)(3) non-profit organization that protects and restores the **101-square-mile Dry Creek Watershed** across Placer and "
         "Sacramento counties, where native **Fall-run Chinook Salmon** and threatened **Central Valley Steelhead Trout** return to spawn.\n"
-        "- **Two Main Eagle Project Components (`JBDC01` Miners Ravine & `JBDC02` Dry Creek at Saugstad Park):**\n"
-        "  1. **Monthly Physiochemical Monitoring (Sierra Streams Institute Equipment Loan):** Monthly tracking of **Conductivity (`SPC`)**, "
+        "- **What this dashboard is for:** Sharing DCC's creek monitoring results with staff, volunteers, and the funding sponsors who make the work possible.\n"
+        "- **Two Monitoring Components (`JBDC01` Miners Ravine & `JBDC02` Dry Creek at Saugstad Park):**\n"
+        "  1. **Physiochemical Monitoring (Sierra Streams Institute Equipment Loan):** Tracking of **Conductivity (`SPC`)**, "
         "**pH (`PH`)**, **Dissolved Oxygen (`DO`)**, **Water Temperature**, and **Turbidity** using professional water quality instruments "
         "loaned from the **Sierra Streams Institute**.\n"
         "  2. **Two-Part Environmental DNA (eDNA) Analysis:**\n"
-        "     - **Monthly BMI Metabarcoding (CALeDNA Lab at UCSC & eDNA Explorer):** Studies how pollution-sensitive **Benthic Macroinvertebrates (BMIs)** "
+        "     - **BMI Metabarcoding (CALeDNA Lab at UCSC & eDNA Explorer):** Studies how pollution-sensitive **Benthic Macroinvertebrates (BMIs)** "
         "are affected by the physical and chemical characteristics of the two creeks.\n"
-        "     - **Quantitative Invasive Species qPCR (Jonah Ventures Laboratory):** Quantitatively models the spread of two potent invasive species—"
+        "     - **Quantitative Invasive Species qPCR (Jonah Ventures Laboratory):** Tests creek water for DNA from two potent invasive species—"
         "**New Zealand Mudsnails** (*Potamopyrgus antipodarum*) and **Asian Clams** (*Corbicula fluminea*)."
     )
+
+    # quick numbers for DCC + sponsors, worked out from the data files
+    all_dates = pd.to_datetime(data["Date"], format="mixed")
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Monitoring Sites", data["Site"].nunique())
+    k2.metric("Field Sampling Days", all_dates.dt.date.nunique())
+    k3.metric("Date Range", f"{all_dates.min():%b %Y} – {all_dates.max():%b %Y}")
+    k4.metric("eDNA qPCR Tests", len(qpcr))
 
     with st.expander("📖 How to Read This Dashboard in 30 Seconds (Click to Expand)", expanded=False):
         g1, g2, g3 = st.columns(3)
@@ -620,33 +652,31 @@ if selected_tab == "Overview":
         with g2:
             st.markdown(
                 "**2️⃣ Click Any Station on the Map**\n"
-                "Our interactive Roseville map shows **Miners Ravine (`JBDC01`)**, **Saugstad Park (`JBDC02`)**, and their "
+                "The interactive Roseville map shows **Miners Ravine (`JBDC01`)**, **Saugstad Park (`JBDC02`)**, and their "
                 "**Confluence**. Clicking a circle marker on the map automatically jumps to that creek's detailed trend graphs!"
             )
         with g3:
             st.markdown(
-                "**3️⃣ Explore eDNA (UCSC CALeDNA & Jonah Ventures) & CEDEN 2.0**\n"
+                "**3️⃣ Explore eDNA (UCSC CALeDNA & Jonah Ventures)**\n"
                 "Use the left sidebar to inspect **BMI metabarcoding & invasive qPCR** (New Zealand Mudsnails + Asian Clams), "
-                "compare creeks side-by-side, run a what-if **Simulation**, or export/harvest state **CEDEN 2.0** records."
+                "compare creeks side-by-side, or run a what-if **Simulation**. Older state (CEDEN) records are in the "
+                "**Historical Analysis** tab at the bottom."
             )
 
-    # Photos of the Dry Creek watershed in Roseville (from Wikimedia Commons, CC BY 3.0 - credit required)
-    st.subheader("📷 The Dry Creek Watershed in Roseville")
+    # Photos from the Dry Creek Conservancy (used with permission)
+    st.subheader("📷 Dry Creek & Its Salmon")
     photos = [
         (
-            "miners_ravine_sign.jpg",
-            "Miners Ravine interpretive sign near Sierra College Blvd, Roseville. "
-            "Photo: UncleVinny, CC BY 3.0, via Wikimedia Commons",
+            "dcc_dry_creek.jpg",
+            "Dry Creek. Photo courtesy of Dry Creek Conservancy",
         ),
         (
-            "miners_ravine_sierra_college_bridge.jpg",
-            "Miners Ravine creek corridor at the Sierra College Blvd bridge, near our JBDC01 site. "
-            "Photo: UncleVinny, CC BY 3.0, via Wikimedia Commons",
+            "dcc_salmon_survey_1.jpg",
+            "A DCC volunteer holds a Chinook salmon during a fall salmon survey. Photo courtesy of Dry Creek Conservancy",
         ),
         (
-            "dry_creek_bike_path_walerga.jpg",
-            "Dry Creek bike path near Walerga Rd, Roseville. "
-            "Photo: UncleVinny, CC BY 3.0, via Wikimedia Commons",
+            "dcc_salmon_survey_2.jpg",
+            "DCC salmon survey volunteers with a returning Chinook. Photo courtesy of Dry Creek Conservancy",
         ),
     ]
     pic_cols = st.columns(3)
@@ -858,7 +888,8 @@ if selected_tab == "Overview":
     st.subheader("🗺️ Dry Creek Watershed Monitoring Site Map (Click a Marker to Open Site Tab)")
     st.caption(
         "**Green Marker** = All 5 vital signs are within ideal targets on the latest sample date. "
-        "**Red Marker** = One or more parameters (such as summer temperature or storm turbidity) are in the watch/stressed zone."
+        "**Red Marker** = One or more parameters (such as summer temperature or storm turbidity) are in the watch/stressed zone. "
+        "**Gray Marker** = Reference point with no samples."
     )
     # Note: Tab index 2 = "Dry creek", Tab index 3 = "Miners Ravine"
     mapdata = pd.DataFrame(
@@ -869,9 +900,9 @@ if selected_tab == "Overview":
             "fill": [
                 "green" if miners_status == "Healthy" else "red",
                 "green" if dry_status == "Healthy" else "red",
-                "green",
+                "gray",
             ],
-            "health_status": [miners_status, dry_status, "Reference Confluence"],
+            "health_status": [miners_status, dry_status, "Reference point (not sampled)"],
             "Tab": [3, 2, 2],
         }
     )
@@ -894,7 +925,7 @@ if selected_tab == "Overview":
         if not match.empty:
             target_tab = int(match.iloc[0]["Tab"])
             if st.session_state.active_tab != target_tab:
-                st.session_state.active_tab = target_tab
+                st.session_state.pending_tab = target_tab
                 st.rerun()
 
 
@@ -916,8 +947,12 @@ Founded in **1995**, the **[Dry Creek Conservancy (DCC)](https://drycreekconserv
 """
     )
 
+    map_img = BASE_DIR / "images" / "dcc_watershed_map.jpg"
+    if map_img.exists():
+        st.image(str(map_img), caption="Dry Creek sub-watersheds. Map courtesy of Dry Creek Conservancy", width=700)
+
     st.divider()
-    st.subheader("🤝 2. How Jayan Bandhu's Eagle Scout Project Supports DCC's 4 Core Pillars")
+    st.subheader("🤝 2. How This Monitoring Program Supports DCC's 4 Core Pillars")
 
     p1_col, p2_col = st.columns(2)
     with p1_col:
@@ -925,11 +960,11 @@ Founded in **1995**, the **[Dry Creek Conservancy (DCC)](https://drycreekconserv
             """
 #### 🐟 Pillar A: Protecting Salmon & Steelhead Spawning Habitat
 Every autumn and winter (November–January), DCC volunteers walk the creeks to count returning Chinook salmon and spawning nests. However, salmon eggs and juvenile fish (*fry*) can only survive if the water remains **cool (`10–20 °C`)** and **oxygen-rich (`DO >= 7.0 mg/L`)**.
-* **Our Tie-In:** By continuously monitoring **Miners Ravine (`JBDC01`)** and **Dry Creek at Saugstad Park (`JBDC02`)**, this dashboard gives DCC and the public a clear visual report card on whether water temperatures and dissolved oxygen stay inside the safe green survival zone for salmon.
+* **Program Tie-In:** By regularly monitoring **Miners Ravine (`JBDC01`)** and **Dry Creek at Saugstad Park (`JBDC02`)**, this dashboard gives DCC, its sponsors, and the public a clear visual report card on whether water temperatures and dissolved oxygen stay inside the safe green survival zone for salmon.
 
 #### 🌧️ Pillar B: Tracking Urban "First Flush" Stormwater Runoff
 As Roseville grows, rainstorms wash tire dust, fertilizers, road salts, and silt off paved streets into storm drains that empty directly into the creeks.
-* **Our Tie-In:** Comparing upstream **Miners Ravine (`JBDC01`)** against downstream **Saugstad Park (`JBDC02`)** lets us measure how urban runoff spikes **Specific Conductance (`SPC`)** and **Turbidity** after storms—and how heavy rain events dilute or flush particles through the watershed.
+* **Program Tie-In:** Comparing upstream **Miners Ravine (`JBDC01`)** against downstream **Saugstad Park (`JBDC02`)** will show how urban runoff affects **Specific Conductance (`SPC`)** and **Turbidity** once storm-season samples are collected.
 """
         )
 
@@ -938,13 +973,16 @@ As Roseville grows, rainstorms wash tire dust, fertilizers, road salts, and silt
             """
 #### 🧬 Pillar C: Two-Track eDNA Bioassessment & Invasive Species Modeling
 Healthy creeks rely on pollution-sensitive **Benthic Macroinvertebrates (BMIs)**—native aquatic insect larvae like mayflies, stoneflies, and caddisflies that feed juvenile salmon—while invasive mollusks threaten to disrupt the food web.
-* **eDNA Track 1 — Monthly BMI Metabarcoding (`CALeDNA Lab at UCSC` & `eDNA Explorer`):** Conducted monthly to understand how the presence of pollution-sensitive BMI organisms is affected by the water chemistry characteristics of Miners Ravine (`JBDC01`) vs. Dry Creek (`JBDC02`). All metabarcoding is processed by the **CALeDNA lab at UC Santa Cruz (UCSC)** and shared publicly on **eDNA Explorer**.
-* **eDNA Track 2 — Quantitative Invasive Species qPCR (`Jonah Ventures Laboratory`):** Quantitative qPCR assays model the spread of **two potent invasive species**—**New Zealand Mudsnails (*Potamopyrgus antipodarum*)** and **Asian Clams (*Corbicula fluminea*)**—analyzed by the **Jonah Ventures laboratory** (confirming **0 strands detected** across all sites!).
+* **eDNA Track 1 — BMI Metabarcoding (`CALeDNA Lab at UCSC` & `eDNA Explorer`):** Conducted to understand how the presence of pollution-sensitive BMI organisms is affected by the water chemistry characteristics of Miners Ravine (`JBDC01`) vs. Dry Creek (`JBDC02`). All metabarcoding is processed by the **CALeDNA lab at UC Santa Cruz (UCSC)** and shared publicly on **eDNA Explorer**.
+* **eDNA Track 2 — Quantitative Invasive Species qPCR (`Jonah Ventures Laboratory`):** Quantitative qPCR assays test for **two potent invasive species**—**New Zealand Mudsnails (*Potamopyrgus antipodarum*)** and **Asian Clams (*Corbicula fluminea*)**—analyzed by the **Jonah Ventures laboratory**. Current results are on the **eDNA results** tab.
 
-#### ☁️ Pillar D: Sierra Streams Institute Field Sensors & CEDEN 2.0 Integration
-All monthly physiochemical monitoring equipment (`DO`, `SPC`, `PH`, `Turbidity`, `Water Temp`) is loaned from the **Sierra Streams Institute**, and field measurements are automatically formatted into California's **17-column CEDEN 2.0 standard** alongside multi-year historical Roseville records harvested from `data.ca.gov`.
+#### ☁️ Pillar D: Sierra Streams Institute Field Sensors
+All physiochemical monitoring equipment (`DO`, `SPC`, `PH`, `Turbidity`, `Water Temp`) is loaned from the **Sierra Streams Institute**. Older state records for Roseville creeks are kept separate in the **Historical Analysis** tab at the end.
 """
         )
+        test_img = BASE_DIR / "images" / "dcc_creek_water_testing.jpg"
+        if test_img.exists():
+            st.image(str(test_img), caption="Testing the creek water. Photo courtesy of Dry Creek Conservancy")
 
     st.divider()
     st.subheader("🔬 3. Scientific, Laboratory & Watershed Partners")
@@ -952,35 +990,30 @@ All monthly physiochemical monitoring equipment (`DO`, `SPC`, `PH`, `Turbidity`,
         [
             {
                 "Partner Organization": "Dry Creek Conservancy (DCC)",
-                "Role in Eagle Project": "Watershed Stewardship & Community Partner (Roseville, CA)",
+                "Role in Monitoring Program": "Watershed Stewardship & Community Partner (Roseville, CA)",
                 "Component Supported": "101-sq-mi Dry Creek Watershed restoration, Chinook salmon & Steelhead habitat protection",
             },
             {
                 "Partner Organization": "Sierra Streams Institute",
-                "Role in Eagle Project": "Field Monitoring Equipment Loan Partner",
+                "Role in Monitoring Program": "Field Monitoring Equipment Loan Partner",
                 "Component Supported": "Monthly physiochemical sensors for Conductivity (SPC), pH, Dissolved Oxygen (DO), Temperature & Turbidity",
             },
             {
                 "Partner Organization": "CALeDNA Lab at UC Santa Cruz (UCSC) & eDNA Explorer",
-                "Role in Eagle Project": "Metabarcoding Sequencing Lab & Open Data Platform",
+                "Role in Monitoring Program": "Metabarcoding Sequencing Lab & Open Data Platform",
                 "Component Supported": "Monthly BMI metabarcoding to study how pollution-sensitive organisms respond to creek water chemistry",
             },
             {
                 "Partner Organization": "Jonah Ventures Laboratory",
-                "Role in Eagle Project": "Quantitative qPCR Molecular Analysis Laboratory",
+                "Role in Monitoring Program": "Quantitative qPCR Molecular Analysis Laboratory",
                 "Component Supported": "Quantitative qPCR assays modeling the spread of invasive New Zealand Mudsnails & Asian Clams",
-            },
-            {
-                "Partner Organization": "California CEDEN 2.0 (data.ca.gov)",
-                "Role in Eagle Project": "Statewide Water Quality Data Exchange Network",
-                "Component Supported": "17-column standardized data export & multi-year historical Roseville creek benchmarking (2000–2026)",
             },
         ]
     )
     st.dataframe(partners_df, use_container_width=True, hide_index=True)
 
     st.divider()
-    st.subheader("📊 4. Quick Reference: What Do Our 5 Water Quality Vital Signs Mean?")
+    st.subheader("📊 4. Quick Reference: What Do the 5 Water Quality Vital Signs Mean?")
     ref_df = pd.DataFrame(
         [
             {
@@ -1035,15 +1068,16 @@ elif selected_tab in ("Dry creek", "Miners Ravine"):
     if is_dry:
         st.info(
             "🏞️ **About Saugstad Park (`JBDC02`):** Located on mainstem **Dry Creek** in Roseville downstream of where "
-            "Miners Ravine and Antelope Creek meet. Watch how **Conductivity (`SPC`)** and **Turbidity** respond to winter "
-            "rainstorms due to urban storm drain runoff, and how **Water Temperature** warms in summer."
+            "Miners Ravine and Antelope Creek meet. As storm-season samples come in, these charts will show how "
+            "**Conductivity (`SPC`)** and **Turbidity** respond to urban storm drain runoff."
         )
     else:
         st.info(
-            "🐟 **About Miners Ravine (`JBDC01`):** A shaded foothill tributary in Roseville monitored by the **Dry Creek Conservancy** "
-            "for **Fall-run Chinook Salmon** and **Steelhead** spawning. Notice how Miners Ravine stays cooler and maintains "
-            "higher **Dissolved Oxygen (`DO`)** than downstream urban reaches."
+            "🐟 **About Miners Ravine (`JBDC01`):** A foothill tributary in Roseville monitored by the **Dry Creek Conservancy** "
+            "for **Fall-run Chinook Salmon** and **Steelhead** spawning. Use the **Comparative analysis** tab to see how it "
+            "lines up against downstream Saugstad Park."
         )
+    st.caption(f"Based on {len(site_df)} field samples ({site_df['Date'].min():%b %d, %Y} – {site_df['Date'].max():%b %d, %Y}).")
     st.caption(
         "🎨 **How to Read the Shaded Colors:** 🟩 **Green Band** = Healthy target range for salmon & creek life | "
         "🟨 **Yellow Band** = Moderate / Watch range | 🟥 **Red Band** = Stressed or impaired range."
@@ -1127,7 +1161,7 @@ elif selected_tab in ("Dry creek", "Miners Ravine"):
 elif selected_tab == "Comparative analysis":
     st.subheader("⚖️ Side-by-Side Creek Comparison (`JBDC01` Miners Ravine vs. `JBDC02` Dry Creek)")
     st.markdown(
-        "Compare our upstream tributary (**Miners Ravine `JBDC01`**, shown in **Blue**) against our downstream urban park site "
+        "Compare the upstream tributary (**Miners Ravine `JBDC01`**, shown in **Blue**) against the downstream urban park site "
         "(**Dry Creek at Saugstad Park `JBDC02`**, shown in **Gray**) to see how water quality changes as the creek flows through Roseville."
     )
     param = st.selectbox(
@@ -1256,7 +1290,7 @@ elif selected_tab == "Correlation analysis":
         sns.scatterplot(data=new, x=p1, y=p2, hue="Site Name", s=80, ax=ax2)
         sns.regplot(data=miners, x=p1, y=p2, scatter=False, ax=ax2, color="#1f77b4", line_kws={"linestyle": "--"})
         sns.regplot(data=dry, x=p1, y=p2, scatter=False, ax=ax2, color="#ff7f0e", line_kws={"linestyle": "--"})
-        ax2.set_title(f"{p1} vs. {p2} Across Eagle Project Sites")
+        ax2.set_title(f"{p1} vs. {p2} Across Monitoring Sites")
         st.pyplot(fig2)
 
         minerscorr = miners_ravine[p1].corr(miners_ravine[p2])
@@ -1269,12 +1303,17 @@ elif selected_tab == "Correlation analysis":
 
         st.info(f"**Miners Ravine (`JBDC01`)**: Correlation between **{p1}** and **{p2}** is **{sign}** and **{txt}** ($r = {minerscorr:.2f}$).")
         st.info(f"**Dry Creek (`JBDC02`)**: Correlation between **{p1}** and **{p2}** is **{sign2}** and **{txt2}** ($r = {dry_creekcorr:.2f}$).")
+        if min(len(miners_ravine), len(dry_creek)) < 10:
+            st.caption(
+                f"Note: only {len(miners_ravine)} samples at JBDC01 and {len(dry_creek)} at JBDC02 so far. With this few points "
+                "a correlation can look strong just by chance, so treat these as early signs, not conclusions."
+            )
 
 
 # ===========================================================================
-# TAB 7: PDF DOWNLOAD
+# TAB 7: PDF & DATA DOWNLOAD
 # ===========================================================================
-elif selected_tab == "PDF Download":
+elif selected_tab == "PDF & Data Download":
     st.subheader("📄 Printable PDF Report Generator (For DCC & Community Sharing)")
     st.markdown(
         "Type a simple request naming a **parameter** (`DO`, `SPC`, `Turbidity`, `PH`, or `Water Temp`) and a **site** "
@@ -1287,67 +1326,105 @@ elif selected_tab == "PDF Download":
     )
     pdf_download(userinput, miners_ravine, dry_creek)
 
+    # Download the JBDC01 / JBDC02 field samples
+    st.divider()
+    st.subheader("💾 Download Field Sample Data")
+    st.caption(
+        "Field readings from `JBDC01` and `JBDC02`. The CEDEN 2.0 version puts each reading on its own row with "
+        "station code, method, units, and lat/long, which is the format California's state water quality database uses."
+    )
+    ceden_converted = convert_samples_to_ceden2(data)
+    dl1, dl2 = st.columns(2)
+    with dl1:
+        st.download_button(
+            label="⬇️ Download Samples (CSV)",
+            data=data.to_csv(index=False).encode("utf-8"),
+            file_name="DCC_JBDC01_JBDC02_Samples.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    with dl2:
+        st.download_button(
+            label="⬇️ Download Samples in CEDEN 2.0 Format (CSV)",
+            data=ceden_converted.to_csv(index=False).encode("utf-8"),
+            file_name="DCC_JBDC01_JBDC02_CEDEN2.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    with st.expander("Preview CEDEN 2.0 rows"):
+        st.dataframe(ceden_converted.head(10), use_container_width=True, hide_index=True)
+
 
 # ===========================================================================
 # TAB 8: eDNA RESULTS
 # ===========================================================================
 elif selected_tab == "eDNA results":
-    st.header("🧬 eDNA Results: Monthly BMI Metabarcoding & Invasive Species qPCR")
+    st.header("🧬 eDNA Results: BMI Metabarcoding & Invasive Species qPCR")
     st.info(
-        "🔬 **How Our Two-Component eDNA Program Works (Supporting the Dry Creek Conservancy):**\n\n"
-        "1. **Monthly BMI Metabarcoding (`CALeDNA Lab at UCSC` → Shared on `eDNA Explorer`):**\n"
-        "   - Conducted monthly to understand how the presence of **pollution-sensitive Benthic Macroinvertebrates (BMIs)** "
+        "🔬 **How the Two-Component eDNA Program Works:**\n\n"
+        "1. **BMI Metabarcoding (`CALeDNA Lab at UCSC` → Shared on `eDNA Explorer`):**\n"
+        "   - Used to understand how the presence of **pollution-sensitive Benthic Macroinvertebrates (BMIs)** "
         "(such as EPT taxa: *Ephemeroptera* mayflies, *Plecoptera* stoneflies, and *Trichoptera* caddisflies) is affected by "
         "the physiochemical characteristics (`DO`, `SPC`, `PH`, `Turbidity`, `Water Temp`) of **Miners Ravine (`JBDC01`)** and "
         "**Dry Creek at Saugstad Park (`JBDC02`)**.\n"
-        "   - Samples are collected as part of Jayan Bandhu's Boy Scout Eagle Project, processed for metabarcoding by the "
+        "   - Samples are collected in the field, processed for metabarcoding by the "
         "**CALeDNA lab at UC Santa Cruz (UCSC)**, and published on **eDNA Explorer**.\n"
         "2. **Quantitative Invasive Species qPCR Assays (`Jonah Ventures Laboratory`):**\n"
-        "   - Quantitatively models the potential spread of **two potent aquatic invasive species**:\n"
+        "   - Tests creek water for DNA from **two potent aquatic invasive species**:\n"
         "     - **New Zealand Mudsnails (*Potamopyrgus antipodarum*)**: Tiny armor-shelled snails that crowd out native BMI insects and starve juvenile salmon.\n"
         "     - **Asian Clams (*Corbicula fluminea*)**: Invasive filter-feeding bivalves that alter creek sediment chemistry and compete with native macroinvertebrates.\n"
         "   - All qPCR assays are analyzed by the **Jonah Ventures laboratory**."
     )
     safe_space("small")
+
+    # summarize the lab file for one species (works as more results get added to QPCR.csv)
+    def qpcr_summary(species_word):
+        rows = qpcr[qpcr["Species"].str.contains(species_word, case=False, na=False)]
+        if rows.empty:
+            return "No results yet", "Not in the current lab file", rows
+        n_hits = int((rows["AvgCopyNum"] > 0).sum())
+        value = "Not Detected" if n_hits == 0 else f"Detected in {n_hits} of {len(rows)}"
+        batches = ", ".join(sorted(rows["BatchId"].astype(str).unique()))
+        return value, f"{len(rows)} samples • Batch {batches}", rows
+
+    snail_val, snail_note, snail_rows = qpcr_summary("Mudsnail")
+    clam_val, clam_note, clam_rows = qpcr_summary("Clam")
+
     c1, c2, c3 = st.columns(3)
     c1.metric(
         "1. BMI Metabarcoding (UCSC CALeDNA)",
-        "Monthly Sampling",
+        "See eDNA Explorer",
         "Processed at UCSC • Shared on eDNA Explorer",
         delta_color="off",
     )
-    c2.metric(
-        "2a. New Zealand Mudsnail qPCR",
-        "0 Strands Detected",
-        "Jonah Ventures Lab • 100% Negative (Healthy!)",
-        delta_color="normal",
-    )
-    c3.metric(
-        "2b. Asian Clam qPCR",
-        "0 Strands Detected",
-        "Jonah Ventures Lab • 100% Negative (Healthy!)",
-        delta_color="normal",
-    )
+    c2.metric("2a. New Zealand Mudsnail qPCR", snail_val, snail_note, delta_color="off")
+    c3.metric("2b. Asian Clam qPCR", clam_val, clam_note, delta_color="off")
     safe_space("small")
-    st.success(
-        "**Jonah Ventures Quantitative qPCR Summary:** Good news for the Dry Creek Watershed — **0 DNA strands were detected** "
-        "for both **New Zealand Mudsnails (*Potamopyrgus antipodarum*)** and **Asian Clams (*Corbicula fluminea*)** across "
-        "Miners Ravine (`JBDC01`), Dry Creek at Saugstad Park (`JBDC02`), and the Confluence (`JBDC03`)!"
-    )
+
+    if not snail_rows.empty and (snail_rows["AvgCopyNum"] == 0).all():
+        st.success(
+            f"**Jonah Ventures qPCR Summary:** No **New Zealand Mudsnail** DNA was found in any of the "
+            f"**{len(snail_rows)} samples** tested (0 copies in all 3 lab replicates of each sample)."
+        )
+    elif not snail_rows.empty:
+        st.warning("**Jonah Ventures qPCR Summary:** New Zealand Mudsnail DNA was detected in at least one sample. See the table below.")
+    if clam_rows.empty:
+        st.caption("Asian Clam qPCR results will show here once they are added to the lab data file.")
 
     if not qpcr.empty:
-        st.subheader("📋 Jonah Ventures qPCR & UCSC CALeDNA Assay Log (`Raw_data/QPCR.csv`)")
-        species_options = ["All Target Organisms"] + sorted(qpcr["Target_Organism"].dropna().unique().tolist())
+        st.subheader("📋 Jonah Ventures qPCR Results")
+        st.caption("`SampleId` is the lab's sample ID. `Rep1`–`Rep3` are DNA copies found in each lab replicate.")
+        species_options = ["All Target Species"] + sorted(qpcr["Species"].dropna().unique().tolist())
         selected_species = st.selectbox("Filter by Invasive Species Target", options=species_options, index=0)
         filtered_qpcr = (
-            qpcr if selected_species == "All Target Organisms" else qpcr[qpcr["Target_Organism"] == selected_species]
+            qpcr if selected_species == "All Target Species" else qpcr[qpcr["Species"] == selected_species]
         )
         st.dataframe(filtered_qpcr, use_container_width=True, hide_index=True)
-        qpcr_csv = qpcr.to_csv(index=False).encode("utf-8")
+        qpcr_csv = qpcr.drop(columns=["Species"]).to_csv(index=False).encode("utf-8")
         st.download_button(
-            label="⬇️ Download Full eDNA qPCR & Metabarcoding Log (CSV)",
+            label="⬇️ Download qPCR Results (CSV)",
             data=qpcr_csv,
-            file_name="Dry_Creek_eDNA_QPCR_JonahVentures_UCSC_CALeDNA.csv",
+            file_name="Dry_Creek_eDNA_qPCR_JonahVentures.csv",
             mime="text/csv",
             type="primary",
         )
@@ -1361,7 +1438,7 @@ elif selected_tab == "Simulation":
     st.markdown(
         "**How It Works:** What happens to **Dissolved Oxygen (`DO`)** if summer **Water Temperature** rises to 24 °C? "
         "Use the controls in the **left sidebar** to pick an input variable, drag the slider, and see the predicted impact "
-        "based on real linear regression fitted to our **Miners Ravine (`JBDC01`)** and **Dry Creek (`JBDC02`)** measurements!"
+        "based on a linear regression fitted to the **Miners Ravine (`JBDC01`)** and **Dry Creek (`JBDC02`)** measurements!"
     )
 
     no1 = ["Water Temp", "DO", "SPC", "PH", "Turbidity"]
@@ -1400,6 +1477,7 @@ elif selected_tab == "Simulation":
     sc1.metric(f"Simulated {p1} (Input)", f"{sim_x}")
     sc2.metric(f"Predicted {yval} (Output)", f"{predicted_y}")
     sc3.metric("Fitted Slope (Δy / Δx)", f"{slope:+.3f}")
+    st.caption(f"The line is fitted to {len(combined)} field samples, so predictions are rough and will improve as more samples are added.")
 
     if HAS_PLOTLY:
         fig_sim = px.scatter(
@@ -1438,43 +1516,197 @@ elif selected_tab == "Simulation":
 
 
 # ===========================================================================
-# TAB 10: CEDEN 2.0 & ROSEVILLE CREEKS INTEGRATION (Historical Harvester!)
+# TAB 10: UPLOAD YOUR OWN DATA - visitors can chart their own CSV (does not change the DCC data)
 # ===========================================================================
-elif selected_tab == "CEDEN 2.0 & Roseville Creeks":
-    st.header("🌊 CEDEN 2.0 Roseville Watershed Historical Harvester & Exporter")
-    st.info(
-        "🏛️ **What Is CEDEN 2.0 & Why Does the Dry Creek Conservancy Use It?**\n"
-        "- **CEDEN (California Environmental Data Exchange Network)** is California's official statewide database for surface "
-        "water quality. Watershed groups like the **Dry Creek Conservancy** contribute monitoring data to CEDEN so state scientists, "
-        "Placer/Sacramento water managers, and the public can track long-term creek health.\n"
-        "- Below, you can **(1) export our Eagle Project measurements (`JBDC01` & `JBDC02`) in official 17-column CEDEN 2.0 format**, "
-        "and **(2) harvest historical Roseville station data** across **Dry Creek**, **Secret Ravine**, **Miner's Ravine**, "
-        "**Antelope Creek**, and **Linda Creek** directly from `data.ca.gov`."
+elif selected_tab == "Upload Your Own Data":
+    st.header("📤 Upload Your Own Data")
+    st.markdown(
+        "Upload any CSV file to make your own charts. Your file is only used in your browser session. It isn't saved, "
+        "and it doesn't change the DCC monitoring data in the other tabs."
+    )
+    st.caption(
+        "Tip: if your file has a date column and columns named `DO`, `SPC`, `PH`, `Turbidity`, or `Water Temp`, "
+        "the time chart will also show the healthy / watch / stressed color bands used in the rest of the dashboard."
     )
 
-    ceden_converted = convert_eagle_to_ceden2(data)
+    user_file = st.file_uploader("Choose a CSV file", type="csv", key="explore_upload")
 
-    col_exp1, col_exp2 = st.columns([2, 1])
-    with col_exp1:
-        st.subheader("1️⃣ Export Eagle Project Data (`JBDC01` & `JBDC02`) in CEDEN 2.0 Format")
-        st.caption(
-            "Maps `DO`, `SPC`, `Turbidity`, `Water Temp`, and `PH` into the 17 required CEDEN 2.0 columns "
-            "(`StationCode`, `SampleDate`, `Analyte`, `MatrixName`, `MethodName`, `MDL`, `RL`, `TargetLatitude`, `TargetLongitude`)."
-        )
-    with col_exp2:
+    if user_file is None:
+        st.info("No file uploaded yet. Not sure how to format one? Download the example below, which uses the DCC field data layout.")
         st.download_button(
-            label="⬇️ Download JBDC01/JBDC02 as CEDEN 2.0 CSV",
-            data=ceden_converted.to_csv(index=False).encode("utf-8"),
-            file_name="Eagle_Project_JBDC01_JBDC02_CEDEN2.csv",
+            label="⬇️ Download Example CSV",
+            data=data.to_csv(index=False).encode("utf-8"),
+            file_name="example_water_quality.csv",
             mime="text/csv",
-            type="primary",
-            use_container_width=True,
         )
+    else:
+        udf = None
+        try:
+            udf = pd.read_csv(user_file)
+            # some exported files (like county rainfall downloads) start with "# comment" lines
+            if len(udf.columns) and str(udf.columns[0]).startswith("#"):
+                user_file.seek(0)
+                udf = pd.read_csv(user_file, comment="#")
+        except Exception as exc:
+            st.error(f"Couldn't read that file as a CSV. ({exc})")
 
-    st.dataframe(ceden_converted.head(10), use_container_width=True, hide_index=True)
+        if udf is not None and udf.empty:
+            st.warning("That file doesn't have any rows.")
+        elif udf is not None:
+            udf = udf.dropna(how="all")
+            udf.columns = udf.columns.astype(str).str.strip()
 
-    st.divider()
-    st.subheader("2️⃣ Historical CEDEN 2.0 Harvester for Roseville, CA Monitoring Stations")
+            def try_parse_dates(series):
+                # handles normal dates ("7/26/2026") and compact ones ("20000101 0000", 202001)
+                if pd.api.types.is_bool_dtype(series):
+                    return pd.Series(pd.NaT, index=series.index)
+                text = series.astype(str).str.strip()
+                if pd.api.types.is_numeric_dtype(series):
+                    text = series.astype("Int64").astype(str)
+                    formats = ["%Y%m%d", "%Y%m"]
+                else:
+                    formats = ["mixed", "%Y%m%d %H%M"]
+                best = pd.Series(pd.NaT, index=series.index)
+                for fmt in formats:
+                    try:
+                        parsed = pd.to_datetime(text, format=fmt, errors="coerce")
+                    except (ValueError, TypeError):
+                        continue
+                    if parsed.notna().mean() > best.notna().mean():
+                        best = parsed
+                return best
+
+            # pick out a date column, number columns, and columns that could split the data into groups
+            date_cols = []
+            for c in udf.columns:
+                if pd.api.types.is_numeric_dtype(udf[c]) and "date" not in c.lower():
+                    continue
+                if try_parse_dates(udf[c]).notna().mean() > 0.8:
+                    date_cols.append(c)
+
+            for c in udf.columns:
+                if c in date_cols or pd.api.types.is_numeric_dtype(udf[c]) or pd.api.types.is_bool_dtype(udf[c]):
+                    continue
+                as_num = pd.to_numeric(udf[c], errors="coerce")
+                if as_num.notna().mean() > 0.8:
+                    udf[c] = as_num
+
+            num_cols = [
+                c for c in udf.columns
+                if pd.api.types.is_numeric_dtype(udf[c]) and not pd.api.types.is_bool_dtype(udf[c]) and c not in date_cols
+            ]
+            group_cols = [c for c in udf.columns if c not in num_cols and c not in date_cols and 1 < udf[c].nunique() <= 20]
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Rows", f"{len(udf):,}")
+            m2.metric("Columns", len(udf.columns))
+            m3.metric("Number Columns", len(num_cols))
+
+            with st.expander("Preview your data", expanded=False):
+                st.dataframe(udf.head(100), use_container_width=True, hide_index=True)
+
+            if not num_cols:
+                st.warning("No number columns were found in this file, so there's nothing to chart.")
+            else:
+                with st.expander("Summary statistics", expanded=False):
+                    st.dataframe(udf[num_cols].describe().T.round(2), use_container_width=True)
+
+                chart_types = []
+                if date_cols:
+                    chart_types.append("Over time")
+                if len(num_cols) >= 2:
+                    chart_types.append("Compare two columns (scatter)")
+                chart_types += ["Distribution (histogram)", "Box plot"]
+
+                cc1, cc2 = st.columns(2)
+                with cc1:
+                    chart_type = st.radio("Chart type", chart_types, horizontal=True)
+                with cc2:
+                    group_by = st.selectbox("Color by (optional)", ["(none)"] + group_cols)
+                color = None if group_by == "(none)" else group_by
+
+                if chart_type == "Over time":
+                    t1, t2 = st.columns(2)
+                    with t1:
+                        dcol = st.selectbox("Date column", date_cols)
+                    with t2:
+                        ycol = st.selectbox("Value to plot", num_cols)
+                    plot_df = udf.copy()
+                    plot_df[dcol] = try_parse_dates(plot_df[dcol])
+                    plot_df = plot_df.dropna(subset=[dcol, ycol]).sort_values(dcol)
+                    if color:
+                        plot_df[color] = plot_df[color].astype(str)
+                    if HAS_PLOTLY:
+                        fig_u = px.line(plot_df, x=dcol, y=ycol, color=color, markers=len(plot_df) <= 500, title=f"{ycol} over time")
+                        if ycol in THRESHOLD_ZONES:
+                            for y0, y1, fill_rgba, zone_label in THRESHOLD_ZONES[ycol]["bands"]:
+                                fig_u.add_hrect(y0=y0, y1=y1, fillcolor=fill_rgba, line_width=0, layer="below")
+                            st.caption("Color bands: 🟩 healthy, 🟨 watch, 🟥 stressed (same ranges as the rest of the dashboard).")
+                        st.plotly_chart(fig_u, use_container_width=True)
+                    else:
+                        st.line_chart(plot_df, x=dcol, y=ycol, color=color)
+
+                elif chart_type == "Compare two columns (scatter)":
+                    s1, s2 = st.columns(2)
+                    with s1:
+                        xcol = st.selectbox("X axis", num_cols, index=0)
+                    with s2:
+                        ycol = st.selectbox("Y axis", num_cols, index=1)
+                    plot_df = udf.dropna(subset=[xcol, ycol]).copy()
+                    if color:
+                        plot_df[color] = plot_df[color].astype(str)
+                    if HAS_PLOTLY:
+                        st.plotly_chart(px.scatter(plot_df, x=xcol, y=ycol, color=color, title=f"{xcol} vs. {ycol}"), use_container_width=True)
+                    else:
+                        st.scatter_chart(plot_df, x=xcol, y=ycol, color=color)
+                    if xcol != ycol and len(plot_df) > 2:
+                        r = plot_df[xcol].corr(plot_df[ycol])
+                        st.info(f"Correlation between **{xcol}** and **{ycol}**: $r = {r:.2f}$ (based on {len(plot_df)} rows).")
+
+                elif chart_type == "Distribution (histogram)":
+                    hcol = st.selectbox("Column", num_cols)
+                    plot_df = udf.dropna(subset=[hcol]).copy()
+                    if color:
+                        plot_df[color] = plot_df[color].astype(str)
+                    if HAS_PLOTLY:
+                        st.plotly_chart(px.histogram(plot_df, x=hcol, color=color, barmode="overlay", title=f"Distribution of {hcol}"), use_container_width=True)
+                    else:
+                        fig_h, ax_h = plt.subplots(figsize=(7.5, 4.0))
+                        sns.histplot(data=plot_df, x=hcol, hue=color, ax=ax_h)
+                        st.pyplot(fig_h)
+
+                else:
+                    bcol = st.selectbox("Column", num_cols)
+                    plot_df = udf.dropna(subset=[bcol]).copy()
+                    if color:
+                        plot_df[color] = plot_df[color].astype(str)
+                    if HAS_PLOTLY:
+                        st.plotly_chart(px.box(plot_df, x=color, y=bcol, points="all", title=f"{bcol}" + (f" by {color}" if color else "")), use_container_width=True)
+                    else:
+                        fig_b, ax_b = plt.subplots(figsize=(7.5, 4.0))
+                        sns.boxplot(data=plot_df, x=color, y=bcol, ax=ax_b)
+                        st.pyplot(fig_b)
+
+                st.caption("To save a chart, hover over it and click the camera icon in the top-right corner.")
+
+
+# ===========================================================================
+# TAB 11: HISTORICAL ANALYSIS (CEDEN) - the only tab that uses state historical data
+# ===========================================================================
+elif selected_tab == "Historical Analysis (CEDEN)":
+    st.header("🕰️ Historical Analysis: Roseville Creeks in the State CEDEN Database")
+    st.info(
+        "The monitoring tabs in this dashboard show DCC field samples at `JBDC01` and `JBDC02`. "
+        "This tab is different: it uses **older records from other monitoring groups** stored in **CEDEN** "
+        "(California Environmental Data Exchange Network), the state's surface water quality database. "
+        "It covers Roseville creeks like **Dry Creek**, **Secret Ravine**, **Miner's Ravine**, **Antelope Creek**, and "
+        "**Linda Creek**, so current readings can be compared against what's been measured in the past."
+    )
+
+    # only load the historical benchmark when this tab is opened
+    ceden_bench_df = get_roseville_ceden_benchmark()
+
+    st.subheader("Get Historical Records from data.ca.gov")
     st.markdown(
         "Queries `data.ca.gov` across **all historical annual CEDEN tables (2000–2026)** using the **Roseville / Dry Creek Watershed "
         "Geospatial Bounding Box** (`38.70°N–38.85°N`, `-121.40°W to -121.15°W`) so every Roseville station is captured while "
@@ -1531,6 +1763,19 @@ elif selected_tab == "CEDEN 2.0 & Roseville Creeks":
         sub_c["SampleDate"] = pd.to_datetime(sub_c["SampleDate"], errors="coerce")
         sub_c = sub_c.dropna(subset=["SampleDate"]).sort_values("SampleDate")
 
+        # match the CEDEN analyte name to the field data column so current samples can go on the same chart
+        analyte_to_col = {
+            "Dissolved Oxygen": "DO",
+            "SpecificConductance": "SPC",
+            "Turbidity": "Turbidity",
+            "Temperature, water": "Water Temp",
+            "pH": "PH",
+        }
+        my_col = analyte_to_col.get(ceden_analyte)
+        show_mine = False
+        if my_col:
+            show_mine = st.checkbox("Show current JBDC01 / JBDC02 samples on top of the historical data", value=True)
+
         if HAS_PLOTLY:
             fig_ceden = px.line(
                 sub_c,
@@ -1540,12 +1785,38 @@ elif selected_tab == "CEDEN 2.0 & Roseville Creeks":
                 line_group="StationCode",
                 markers=True,
                 hover_data=["StationCode", "StationName"],
-                title=f"Roseville Multi-Creek CEDEN 2.0 Historical Trajectory — {ceden_analyte}",
+                title=f"Roseville Creeks Historical Record — {ceden_analyte}",
             )
+            if show_mine:
+                for site_df, name, colr in [
+                    (miners_ravine, "Current samples: Miners Ravine (JBDC01)", "#1A73E8"),
+                    (dry_creek, "Current samples: Dry Creek (JBDC02)", "#111111"),
+                ]:
+                    fig_ceden.add_trace(
+                        go.Scatter(
+                            x=site_df["Date"],
+                            y=site_df[my_col],
+                            mode="markers",
+                            name=name,
+                            marker=dict(size=11, symbol="star", color=colr, line=dict(width=1, color="white")),
+                        )
+                    )
             st.plotly_chart(fig_ceden, use_container_width=True)
         else:
             fig_c, ax_c = plt.subplots(figsize=(8.0, 4.2))
             sns.lineplot(data=sub_c, x="SampleDate", y="Result", hue="Creek", marker="o", ax=ax_c)
+            if show_mine:
+                ax_c.scatter(miners_ravine["Date"], miners_ravine[my_col], marker="*", s=120, color="#1A73E8", label="Current samples: JBDC01")
+                ax_c.scatter(dry_creek["Date"], dry_creek[my_col], marker="*", s=120, color="black", label="Current samples: JBDC02")
+                ax_c.legend()
             ax_c.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
-            ax_c.set_title(f"Roseville Multi-Creek CEDEN 2.0 Historical Trajectory — {ceden_analyte}")
+            ax_c.set_title(f"Roseville Creeks Historical Record — {ceden_analyte}")
             st.pyplot(fig_c)
+
+        if show_mine and not sub_c.empty:
+            hist_vals = pd.to_numeric(sub_c["Result"], errors="coerce").dropna()
+            mine_vals = pd.concat([miners_ravine[my_col], dry_creek[my_col]]).dropna()
+            h1, h2, h3 = st.columns(3)
+            h1.metric("Historical median", f"{hist_vals.median():.2f}")
+            h2.metric("Historical range", f"{hist_vals.min():.2f} – {hist_vals.max():.2f}")
+            h3.metric("Current samples median", f"{mine_vals.median():.2f}")
