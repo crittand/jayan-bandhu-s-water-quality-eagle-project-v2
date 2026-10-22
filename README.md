@@ -1,7 +1,7 @@
-# Jayan-Bandhu's-Water-Quality-Eagle-Project
-This is an Eagle project that aims to track the creek health of the Dry Creek Watershed using eDNA and water chemistry measurements. Physiochemical measurements will be conducted on a monthly basis.
+# DCC-Water-Quality-Project
+This project that aims to track the creek health of the Dry Creek Watershed using eDNA and water chemistry measurements. Physiochemical measurements will be conducted on a monthly basis.
 
-This Eagle project contains two main components: **eDNA** and **physiochemical** monitoring.
+This project contains two main components: **eDNA** and **physiochemical** monitoring.
 
 ### 🧬 eDNA Types & Laboratory Partners
 1. **Monthly Metabarcoding of BMI (Benthic Macroinvertebrates)**: Conducted to understand how the presence of pollution-sensitive organisms is affected by characteristics of the two creeks (`JBDC01` Miners Ravine and `JBDC02` Dry Creek at Saugstad Park). Samples are collected as part of a Boy Scout Eagle project, processed by the **CALeDNA lab at UC Santa Cruz (UCSC)**, and shared publicly on **eDNA Explorer**.
