@@ -630,6 +630,31 @@ if selected_tab == "Overview":
                 "compare creeks side-by-side, run a what-if **Simulation**, or export/harvest state **CEDEN 2.0** records."
             )
 
+    # Photos of the Dry Creek watershed in Roseville (from Wikimedia Commons, CC BY 3.0 - credit required)
+    st.subheader("📷 The Dry Creek Watershed in Roseville")
+    photos = [
+        (
+            "miners_ravine_sign.jpg",
+            "Miners Ravine interpretive sign near Sierra College Blvd, Roseville. "
+            "Photo: UncleVinny, CC BY 3.0, via Wikimedia Commons",
+        ),
+        (
+            "miners_ravine_sierra_college_bridge.jpg",
+            "Miners Ravine creek corridor at the Sierra College Blvd bridge, near our JBDC01 site. "
+            "Photo: UncleVinny, CC BY 3.0, via Wikimedia Commons",
+        ),
+        (
+            "dry_creek_bike_path_walerga.jpg",
+            "Dry Creek bike path near Walerga Rd, Roseville. "
+            "Photo: UncleVinny, CC BY 3.0, via Wikimedia Commons",
+        ),
+    ]
+    pic_cols = st.columns(3)
+    for col, (fname, cap) in zip(pic_cols, photos):
+        img_path = BASE_DIR / "images" / fname
+        if img_path.exists():
+            col.image(str(img_path), caption=cap)
+
     active_alerts = send_alerts(miners_ravine) + send_alerts(dry_creek)
     if active_alerts:
         with st.expander(f"⚠️ {len(active_alerts)} Latest Threshold Watch Alert(s)", expanded=True):
