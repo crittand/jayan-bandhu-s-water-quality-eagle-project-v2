@@ -19,13 +19,13 @@ All field monitoring equipment is loaned from the **Sierra Streams Institute**.
 
 ---
 
-## 🌲 Community Stewardship: Dry Creek Conservancy (DCC) & CEDEN 2.0 Integration
+## 🌲 Community Stewardship: Dry Creek Conservancy (DCC) & CEDEN Integration
 
 This dashboard connects Jayan Bandhu's Eagle Scout field monitoring directly to the mission of the **[Dry Creek Conservancy (DCC)](https://drycreekconservancy.org/)**—a Roseville 501(c)(3) watershed stewardship organization founded in 1995 to protect the **101-square-mile Dry Creek Watershed** across Placer and Sacramento counties:
 
 - **Protecting Salmon & Steelhead Habitat**: Upstream **Miners Ravine (`JBDC01`)** and **Secret Ravine** provide vital spawning and rearing habitat for native **Fall-run Chinook Salmon** and threatened **Central Valley Steelhead Trout**.
 - **Tracking Urban "First Flush" Runoff**: Downstream **Saugstad Park (`JBDC02`)** captures mainstem Dry Creek water quality below the urban Roseville confluence, tracking how street storm drains affect conductivity and turbidity.
-- **Statewide CEDEN 2.0 Export & Multi-Year Historical Harvester**: Automatically converts Eagle Project field data into California's official **17-column CEDEN 2.0 format** and harvests historical Roseville monitoring records (2000–2026) from `data.ca.gov` (including standalone CLI script `download_roseville_ceden_history.py`).
+- **CEDEN Export & Historical Data**: Exports field data as CEDEN-style rows (column names, analyte names, and defaults from the State Water Board's CEDEN data dictionary; a starting point for a CEDEN submission, not the official template). The **Historical Analysis** tab shows real CEDEN records for the Dry Creek Watershed (2000–2023, 57 stations) downloaded from `data.ca.gov` by `download_roseville_ceden_history.py`.
 
 ## 🚀 Run Locally in VS Code
 
@@ -36,8 +36,19 @@ pip install -r requirements.txt
 streamlit run waterquality.py
 ```
 
-To harvest all historical Roseville CEDEN records (2000–2026) from the command line:
+To download the latest CEDEN records for the Dry Creek Watershed from the command line:
 
 ```bash
 python3 download_roseville_ceden_history.py
 ```
+
+This searches the CEDEN Chemistry, Habitat, and Augmentation datasets on data.ca.gov (every year) and saves a new dated file, `Raw_data/ceden/dry_creek_watershed_ceden_YYYY-MM-DD.csv.gz`. It never overwrites an earlier download. The dashboard uses the newest file in that folder.
+
+To download the other historical sources (City of Roseville wastewater plants' creek monitoring from eSMR, and USGS stream flow / samples):
+
+```bash
+python3 download_esmr_usgs_history.py          # both (eSMR takes ~5-10 minutes)
+python3 download_esmr_usgs_history.py usgs     # just USGS
+```
+
+These save to `Raw_data/esmr/` and `Raw_data/usgs/`. The **Historical Analysis** tab lets you pick any combination of CEDEN, eSMR (Dry Creek WWTP, Pleasant Grove WWTP), and USGS. DCC's own JBDC01/JBDC02 sampling stays on the monitoring tabs.

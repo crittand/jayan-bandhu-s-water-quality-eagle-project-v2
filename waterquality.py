@@ -1,10 +1,8 @@
 import io
-import json
 import math
+from datetime import date, datetime
 from pathlib import Path
-import random
-import urllib.parse
-import urllib.request
+from zoneinfo import ZoneInfo
 
 import folium
 import matplotlib
@@ -15,8 +13,12 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer
 import seaborn as sns
+import segno
 import streamlit as st
 from streamlit_folium import st_folium
+
+import download_roseville_ceden_history as ceden
+import download_esmr_usgs_history as other_sources
 
 try:
     import plotly.express as px
@@ -36,10 +38,6 @@ st.set_page_config(
 
 BASE_DIR = Path(__file__).parent
 
-# Roseville / Dry Creek Watershed Bounding Box (Placer & N. Sacramento County)
-ROSEVILLE_LAT_MIN, ROSEVILLE_LAT_MAX = 38.70, 38.85
-ROSEVILLE_LON_MIN, ROSEVILLE_LON_MAX = -121.40, -121.15
-CKAN_API_BASE = "https://data.ca.gov/api/3/action"
 
 
 def safe_space(size: str = "small") -> None:
@@ -79,153 +77,30 @@ if "active_tab" not in st.session_state:
     st.session_state.active_tab = 0
 
 
-def infer_roseville_creek(station_name: str) -> str:
-    s = str(station_name).lower()
-    if "secret" in s:
-        return "Secret Ravine"
-    if "miner" in s:
-        return "Miner's Ravine"
-    if "antelope" in s:
-        return "Antelope Creek"
-    if "linda" in s:
-        return "Linda Creek"
-    if "strap" in s:
-        return "Strap Ravine"
-    return "Dry Creek (Mainstem)"
-
-
-# --- Self-Contained Roseville CEDEN 2.0 Benchmark Generator & Historical CKAN Harvester ---
+# --- Historical data from other monitoring programs (Historical Analysis tab only) ---
+# Download / cleaning logic lives in the two downloader scripts so the dashboard and the
+# command line always use the same rules:
+#   download_roseville_ceden_history.py  -> CEDEN (State Water Board)
+#   download_esmr_usgs_history.py        -> eSMR (Roseville's two wastewater plants) and USGS
 @st.cache_data(show_spinner=False)
-def get_roseville_ceden_benchmark() -> pd.DataFrame:
-    """Loads Raw_data/roseville_ceden_samples.csv if present, else builds a self-contained Roseville creeks dataset."""
-    csv_path = BASE_DIR / "Raw_data" / "roseville_ceden_samples.csv"
-    if csv_path.exists():
-        df = pd.read_csv(csv_path)
-        if "Creek" not in df.columns and "StationName" in df.columns:
-            df["Creek"] = df["StationName"].apply(infer_roseville_creek)
-        return df
-
-    rng = random.Random(42)
-    stations = [
-        ("519DRYC01", "Dry Creek at Vernon St Bridge (Roseville)", "Dry Creek (Mainstem)", 38.7342, -121.3011, 1.2, -0.4, 1.25, 215),
-        ("519DRYC02", "Dry Creek at Saugstad Park (JBDC02)", "Dry Creek (Mainstem)", 38.7427, -121.2842, 0.6, -0.1, 1.10, 195),
-        ("519SECR01", "Secret Ravine at Sierra College Blvd", "Secret Ravine", 38.7593, -121.2563, -1.4, 0.7, 0.85, 165),
-        ("519MINR01", "Miners Ravine (JBDC01)", "Miner's Ravine", 38.7529, -121.2415, -0.9, 0.5, 0.90, 175),
-        ("519ANTC01", "Antelope Creek at Multi-Use Trail", "Antelope Creek", 38.7626, -121.2605, 1.5, -0.8, 1.45, 255),
-        ("519LIND01", "Linda Creek at Champion Oaks", "Linda Creek", 38.7245, -121.2720, 1.0, -0.5, 1.20, 230),
-    ]
-    rows = []
-    for year in [2025, 2026]:
-        max_m = 12 if year == 2025 else 9
-        for m in range(1, max_m + 1):
-            d_str = f"{year}-{m:02d}-15"
-            s_temp = 14.5 + 6.8 * math.sin((m - 4) * math.pi / 6.0)
-            wet = m in (11, 12, 1, 2, 3)
-            for code, name, creek, lat, lon, t_off, do_off, tb_f, c_base in stations:
-                t_val = round(s_temp + t_off + rng.uniform(-0.6, 0.6), 2)
-                do_val = round(max(5.0, 11.4 - 0.24 * (t_val - 10.0) + do_off + rng.uniform(-0.3, 0.3)), 2)
-                ph_val = round(7.45 + rng.uniform(-0.35, 0.45), 2)
-                tb_val = round(max(0.8, (11.5 if wet else 3.2) * tb_f + rng.uniform(-1.0, 3.5)), 2)
-                sp_val = round(c_base * (0.82 if wet else 1.12) + rng.uniform(-15, 15), 1)
-                for an, val, unit in [
-                    ("Dissolved Oxygen", do_val, "mg/L"),
-                    ("Temperature, water", t_val, "Deg C"),
-                    ("pH", ph_val, "none"),
-                    ("Turbidity", tb_val, "NTU"),
-                    ("SpecificConductance", sp_val, "uS/cm"),
-                ]:
-                    rows.append(
-                        {
-                            "StationCode": code,
-                            "StationName": name,
-                            "Creek": creek,
-                            "SampleDate": d_str,
-                            "Analyte": an,
-                            "Result": val,
-                            "Unit": unit,
-                            "TargetLatitude": lat,
-                            "TargetLongitude": lon,
-                        }
-                    )
-    return pd.DataFrame(rows)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def discover_ceden_historical_tables(package_id: str = "surface-water-chemistry-results") -> dict[str, str]:
-    """Queries data.ca.gov package_show to dynamically list all historical annual CEDEN tables (2000-2026)."""
-    fallback = {
-        "2026 Surface Water Chemistry": "7c2faf29-d5d3-4ad6-a429-442ed337febb",
-        "2025 Surface Water Chemistry": "97b8bb60-8e58-4c97-a07f-d51a48cd36d4",
-        "2024 Surface Water Chemistry": "9dcf551f-452d-4257-b857-30fbcc883a03",
-        "2019 Surface Water Chemistry": "6cf99106-f45f-4c17-80af-b91603f391d9",
-        "2012 Surface Water Chemistry": "f9dd0348-85d5-4945-aa62-c7c9ad4cf6fd",
-        "2005 Surface Water Chemistry": "9538cbfa-f8be-4445-97dc-b931579bb927",
-    }
-    try:
-        url = f"{CKAN_API_BASE}/package_show?id={urllib.parse.quote(package_id)}"
-        req = urllib.request.Request(url, headers={"User-Agent": "DryCreekConservancyDashboard/2.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-        resources = payload.get("result", {}).get("resources", [])
-        discovered = {}
-        for r in resources:
-            if r.get("datastore_active") and r.get("id"):
-                name = r.get("name") or r.get("description") or r["id"]
-                discovered[str(name)] = str(r["id"])
-        return discovered if discovered else fallback
-    except Exception:
-        return fallback
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_live_ceden_ckan_stdlib(resource_id: str) -> pd.DataFrame:
-    """Queries data.ca.gov CKAN SQL API for Roseville / Dry Creek Watershed stations using bounding box + creek names."""
-    sql = (
-        f'SELECT "Program", "Project", "StationCode", "StationName", "SampleDate", '
-        f'"Analyte", "Result", "Unit", "MDL", "RL", "DataQuality", "TargetLatitude", "TargetLongitude" '
-        f'FROM "{resource_id}" '
-        f"WHERE ("
-        f"  (CAST(\"TargetLatitude\" AS FLOAT) BETWEEN {ROSEVILLE_LAT_MIN} AND {ROSEVILLE_LAT_MAX} "
-        f"   AND CAST(\"TargetLongitude\" AS FLOAT) BETWEEN {ROSEVILLE_LON_MIN} AND {ROSEVILLE_LON_MAX}) "
-        f"  OR (\"StationName\" ILIKE '%Roseville%') "
-        f"  OR (\"StationName\" ILIKE '%Secret Ravine%') "
-        f"  OR (\"StationName\" ILIKE '%Miners Ravine%' OR \"StationName\" ILIKE '%Miner''s Ravine%') "
-        f"  OR (\"StationName\" ILIKE '%Antelope Creek%' AND CAST(\"TargetLatitude\" AS FLOAT) > 38.6) "
-        f"  OR (\"StationName\" ILIKE '%Linda Creek%' AND CAST(\"TargetLatitude\" AS FLOAT) > 38.6) "
-        f"  OR (\"StationName\" ILIKE '%Dry Creek%' AND CAST(\"TargetLatitude\" AS FLOAT) BETWEEN {ROSEVILLE_LAT_MIN} AND {ROSEVILLE_LAT_MAX})"
-        f") LIMIT 2500"
-    )
-    url = f"{CKAN_API_BASE}/datastore_search_sql?sql=" + urllib.parse.quote(sql)
-    req = urllib.request.Request(url, headers={"User-Agent": "DryCreekConservancyDashboard/2.0"})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        payload = json.loads(resp.read().decode("utf-8"))
-    records = payload.get("result", {}).get("records", [])
-    if not records:
-        return pd.DataFrame()
-    df = pd.DataFrame(records)
+def load_history_file(kind: str, path_str: str, modified: float) -> pd.DataFrame:
+    """Loads a saved download into the shared column layout (`modified` refreshes the cache when the file changes)."""
+    df = pd.read_csv(path_str, low_memory=False)
+    if kind == "ceden":
+        df = other_sources.ceden_to_unified(df)
+    df["SampleDate"] = pd.to_datetime(df["SampleDate"], errors="coerce")
     df["Result"] = pd.to_numeric(df["Result"], errors="coerce")
-    df["Creek"] = df["StationName"].apply(infer_roseville_creek)
-    return df.dropna(subset=["Result"])
+    return df
 
 
-def harvest_multiyear_roseville_history(resource_map: dict[str, str]) -> pd.DataFrame:
-    """Sweeps across all selected historical CEDEN tables and combines Roseville records."""
-    frames = []
-    prog = st.progress(0.0, text="Starting historical CEDEN harvest from data.ca.gov...")
-    total = len(resource_map)
-    for idx, (label, res_id) in enumerate(resource_map.items(), start=1):
-        prog.progress(idx / total, text=f"Querying {label} ({idx}/{total})...")
-        try:
-            part = fetch_live_ceden_ckan_stdlib(res_id)
-            if not part.empty:
-                part["SourceTable"] = label
-                frames.append(part)
-        except Exception:
-            continue
-    prog.empty()
-    if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+@st.cache_data(ttl=3600, show_spinner=False)
+def ceden_year_tables() -> list[dict]:
+    return ceden.list_year_tables()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def esmr_year_tables() -> list[dict]:
+    return other_sources.esmr_year_tables()
 
 
 # --- Load the real field + lab data ---
@@ -466,9 +341,11 @@ def pdf_download(prompt: str, miners_ravine: pd.DataFrame, dry_creek: pd.DataFra
             st.pyplot(fig3)
 
 
-# --- Convert Monitoring Data to Official CEDEN 2.0 Schema ---
+# --- Convert Monitoring Data to CEDEN-style rows ---
 def convert_samples_to_ceden2(df: pd.DataFrame) -> pd.DataFrame:
-    """Transforms JBDC01 / JBDC02 rows into standard 17-column CEDEN 2.0 submission format."""
+    """Turns JBDC01 / JBDC02 rows into one row per reading, using CEDEN column names, analyte names, and
+    default values from the State Water Board's CEDEN data dictionary. This is a starting point for a
+    CEDEN submission, not the official submission template (that comes from ceden.org)."""
     station_lookup = {
         "JBDC01": {
             "StationCode": "519MINR_JBDC01",
@@ -484,11 +361,12 @@ def convert_samples_to_ceden2(df: pd.DataFrame) -> pd.DataFrame:
         },
     }
     param_lookup = {
-        "DO": ("Dissolved Oxygen", "mg/L", "Field Sensor / EPA 360.1", 0.1, 0.2),
-        "SPC": ("SpecificConductance", "uS/cm", "Field Sensor / EPA 120.1", 1.0, 2.0),
-        "Turbidity": ("Turbidity", "NTU", "Field Nephelometer / EPA 180.1", 0.1, 0.5),
-        "Water Temp": ("Temperature, water", "Deg C", "Field Thermistor", 0.1, 0.1),
-        "PH": ("pH", "none", "Field Electrode / EPA 150.1", 0.1, 0.1),
+        # Analyte names + units as they appear in the State Water Board's published CEDEN data
+        "DO": ("Oxygen, Dissolved, Total", "mg/L"),
+        "SPC": ("SpecificConductivity, Total", "uS/cm"),
+        "Turbidity": ("Turbidity, Total", "NTU"),
+        "Water Temp": ("Temperature", "Deg C"),
+        "PH": ("pH", "none"),
     }
     ceden_rows = []
     for _, row in df.iterrows():
@@ -498,7 +376,7 @@ def convert_samples_to_ceden2(df: pd.DataFrame) -> pd.DataFrame:
             {"StationCode": site_code, "StationName": f"Roseville Station {site_code}", "Lat": 38.75, "Lon": -121.26},
         )
         sample_dt = pd.to_datetime(row["Date"]).strftime("%Y-%m-%d")
-        for col_key, (analyte_name, unit, method, mdl, rl) in param_lookup.items():
+        for col_key, (analyte_name, unit) in param_lookup.items():
             if col_key in row and pd.notna(row[col_key]):
                 ceden_rows.append(
                     {
@@ -508,17 +386,17 @@ def convert_samples_to_ceden2(df: pd.DataFrame) -> pd.DataFrame:
                         "StationCode": st_meta["StationCode"],
                         "StationName": st_meta["StationName"],
                         "SampleDate": sample_dt,
-                        "CollectionTime": "09:30:00",
+                        # CEDEN dictionary defaults for things the field sheet doesn't record yet
+                        "CollectionTime": "00:00",
                         "Analyte": analyte_name,
                         "MatrixName": "samplewater",
-                        "MethodName": method,
+                        "MethodName": "Not Recorded",
                         "Result": row[col_key],
                         "Unit": unit,
-                        "MDL": mdl,
-                        "RL": rl,
-                        "DataQuality": "Passed",
-                        "TargetLatitude": st_meta["Lat"],
-                        "TargetLongitude": st_meta["Lon"],
+                        "MDL": -88,
+                        "RL": -88,
+                        "Latitude": st_meta["Lat"],
+                        "Longitude": st_meta["Lon"],
                     }
                 )
     return pd.DataFrame(ceden_rows)
@@ -531,6 +409,40 @@ st.caption(
     "Monthly **Physiochemical Monitoring** (equipment loaned from **Sierra Streams Institute**) & **eDNA** "
     "(**CALeDNA Lab at UCSC / eDNA Explorer** BMI Metabarcoding + **Jonah Ventures** Invasive Species qPCR)"
 )
+
+# --- Event banner with QR code (shows on every tab, hides itself after the event) ---
+# To promote a different event, change these values. The QR code is made from "url" automatically.
+SALMON_EVENT = {
+    "title": "2026 Salmon Homecoming",
+    "when": "Sunday, November 8, 2026",
+    "where": "Royer Park, Roseville",
+    "url": "https://www.facebook.com/events/1332502405384391",
+    "last_day": date(2026, 11, 8),
+}
+
+
+@st.cache_data(show_spinner=False)
+def make_qr_png(url: str) -> bytes:
+    """PNG QR code for a link (medium error correction so it still scans if printed small or screenshotted)."""
+    buf = io.BytesIO()
+    segno.make(url, error="m").save(buf, kind="png", scale=8, border=2, dark="#0B2545")
+    return buf.getvalue()
+
+
+today_pacific = datetime.now(ZoneInfo("America/Los_Angeles")).date()  # Streamlit Cloud servers run on UTC
+if today_pacific <= SALMON_EVENT["last_day"]:
+    with st.container(border=True):
+        qr_col, txt_col = st.columns([1, 5], vertical_alignment="center")
+        with qr_col:
+            st.image(make_qr_png(SALMON_EVENT["url"]), width=140)
+        with txt_col:
+            st.markdown(f"#### 🐟 {SALMON_EVENT['title']}")
+            st.markdown(
+                f"**{SALMON_EVENT['when']} · {SALMON_EVENT['where']}**  \n"
+                "Come watch Chinook salmon return to Dry Creek with the Dry Creek Conservancy! "
+                "Scan the code with your phone camera, or use the button."
+            )
+            st.link_button("📅 Event details & RSVP on Facebook", SALMON_EVENT["url"], type="primary")
 
 reqcols = ["DO", "SPC", "Turbidity", "Water Temp", "PH", "Site"]
 
@@ -547,7 +459,7 @@ with st.sidebar:
         "eDNA results",
         "Simulation",
         "Upload Your Own Data",
-        "Historical Analysis (CEDEN)",
+        "Historical Analysis",
     ]
     # the map on the Overview tab sets pending_tab when a marker is clicked
     if "pending_tab" in st.session_state:
@@ -659,7 +571,7 @@ if selected_tab == "Overview":
             st.markdown(
                 "**3️⃣ Explore eDNA (UCSC CALeDNA & Jonah Ventures)**\n"
                 "Use the left sidebar to inspect **BMI metabarcoding & invasive qPCR** (New Zealand Mudsnails + Asian Clams), "
-                "compare creeks side-by-side, or run a what-if **Simulation**. Older state (CEDEN) records are in the "
+                "compare creeks side-by-side, or run a what-if **Simulation**. Historical data from other monitoring programs is in the "
                 "**Historical Analysis** tab at the bottom."
             )
 
@@ -977,7 +889,7 @@ Healthy creeks rely on pollution-sensitive **Benthic Macroinvertebrates (BMIs)**
 * **eDNA Track 2 — Quantitative Invasive Species qPCR (`Jonah Ventures Laboratory`):** Quantitative qPCR assays test for **two potent invasive species**—**New Zealand Mudsnails (*Potamopyrgus antipodarum*)** and **Asian Clams (*Corbicula fluminea*)**—analyzed by the **Jonah Ventures laboratory**. Current results are on the **eDNA results** tab.
 
 #### ☁️ Pillar D: Sierra Streams Institute Field Sensors
-All physiochemical monitoring equipment (`DO`, `SPC`, `PH`, `Turbidity`, `Water Temp`) is loaned from the **Sierra Streams Institute**. Older state records for Roseville creeks are kept separate in the **Historical Analysis** tab at the end.
+All physiochemical monitoring equipment (`DO`, `SPC`, `PH`, `Turbidity`, `Water Temp`) is loaned from the **Sierra Streams Institute**. Historical data from other monitoring programs (state, USGS, and Roseville's wastewater plants) is kept separate in the **Historical Analysis** tab at the end.
 """
         )
         test_img = BASE_DIR / "images" / "dcc_creek_water_testing.jpg"
@@ -1330,8 +1242,9 @@ elif selected_tab == "PDF & Data Download":
     st.divider()
     st.subheader("💾 Download Field Sample Data")
     st.caption(
-        "Field readings from `JBDC01` and `JBDC02`. The CEDEN 2.0 version puts each reading on its own row with "
-        "station code, method, units, and lat/long, which is the format California's state water quality database uses."
+        "Field readings from `JBDC01` and `JBDC02`. The CEDEN-style version puts each reading on its own row and uses the "
+        "column names, analyte names, and default values from the State Water Board's CEDEN data dictionary. It's a starting "
+        "point for submitting to CEDEN; the official submission templates are at ceden.org."
     )
     ceden_converted = convert_samples_to_ceden2(data)
     dl1, dl2 = st.columns(2)
@@ -1345,13 +1258,13 @@ elif selected_tab == "PDF & Data Download":
         )
     with dl2:
         st.download_button(
-            label="⬇️ Download Samples in CEDEN 2.0 Format (CSV)",
+            label="⬇️ Download Samples, CEDEN-style (CSV)",
             data=ceden_converted.to_csv(index=False).encode("utf-8"),
-            file_name="DCC_JBDC01_JBDC02_CEDEN2.csv",
+            file_name="DCC_JBDC01_JBDC02_CEDEN_style.csv",
             mime="text/csv",
             use_container_width=True,
         )
-    with st.expander("Preview CEDEN 2.0 rows"):
+    with st.expander("Preview CEDEN-style rows"):
         st.dataframe(ceden_converted.head(10), use_container_width=True, hide_index=True)
 
 
@@ -1622,15 +1535,25 @@ elif selected_tab == "Upload Your Own Data":
                 with cc1:
                     chart_type = st.radio("Chart type", chart_types, horizontal=True)
                 with cc2:
-                    group_by = st.selectbox("Color by (optional)", ["(none)"] + group_cols)
+                    # default to coloring by Site when the file has one, so lines don't zig-zag between sites
+                    group_options = ["(none)"] + group_cols
+                    site_like = [c for c in group_cols if c.lower() in ("site", "site name", "station", "stationcode")]
+                    group_by = st.selectbox(
+                        "Color by (optional)",
+                        group_options,
+                        index=group_options.index(site_like[0]) if site_like else 0,
+                    )
                 color = None if group_by == "(none)" else group_by
+                # start on a water quality parameter if the file has one
+                std_params = [c for c in ["DO", "SPC", "PH", "Turbidity", "Water Temp"] if c in num_cols]
+                first_param = num_cols.index(std_params[0]) if std_params else 0
 
                 if chart_type == "Over time":
                     t1, t2 = st.columns(2)
                     with t1:
                         dcol = st.selectbox("Date column", date_cols)
                     with t2:
-                        ycol = st.selectbox("Value to plot", num_cols)
+                        ycol = st.selectbox("Value to plot", num_cols, index=first_param)
                     plot_df = udf.copy()
                     plot_df[dcol] = try_parse_dates(plot_df[dcol])
                     plot_df = plot_df.dropna(subset=[dcol, ycol]).sort_values(dcol)
@@ -1664,7 +1587,7 @@ elif selected_tab == "Upload Your Own Data":
                         st.info(f"Correlation between **{xcol}** and **{ycol}**: $r = {r:.2f}$ (based on {len(plot_df)} rows).")
 
                 elif chart_type == "Distribution (histogram)":
-                    hcol = st.selectbox("Column", num_cols)
+                    hcol = st.selectbox("Column", num_cols, index=first_param)
                     plot_df = udf.dropna(subset=[hcol]).copy()
                     if color:
                         plot_df[color] = plot_df[color].astype(str)
@@ -1676,7 +1599,7 @@ elif selected_tab == "Upload Your Own Data":
                         st.pyplot(fig_h)
 
                 else:
-                    bcol = st.selectbox("Column", num_cols)
+                    bcol = st.selectbox("Column", num_cols, index=first_param)
                     plot_df = udf.dropna(subset=[bcol]).copy()
                     if color:
                         plot_df[color] = plot_df[color].astype(str)
@@ -1691,132 +1614,390 @@ elif selected_tab == "Upload Your Own Data":
 
 
 # ===========================================================================
-# TAB 11: HISTORICAL ANALYSIS (CEDEN) - the only tab that uses state historical data
+# TAB 11: HISTORICAL ANALYSIS - the only tab that uses other programs' historical data
 # ===========================================================================
-elif selected_tab == "Historical Analysis (CEDEN)":
-    st.header("🕰️ Historical Analysis: Roseville Creeks in the State CEDEN Database")
+elif selected_tab == "Historical Analysis":
+    st.header("🕰️ Historical Analysis: Other Monitoring in the Roseville Area")
     st.info(
-        "The monitoring tabs in this dashboard show DCC field samples at `JBDC01` and `JBDC02`. "
-        "This tab is different: it uses **older records from other monitoring groups** stored in **CEDEN** "
-        "(California Environmental Data Exchange Network), the state's surface water quality database. "
-        "It covers Roseville creeks like **Dry Creek**, **Secret Ravine**, **Miner's Ravine**, **Antelope Creek**, and "
-        "**Linda Creek**, so current readings can be compared against what's been measured in the past."
+        "The monitoring tabs in this dashboard show DCC field samples at `JBDC01` and `JBDC02`. This tab is separate: it shows "
+        "**historical data collected by other groups**, so current readings can be put in context. Pick one or more sources below."
     )
 
-    # only load the historical benchmark when this tab is opened
-    ceden_bench_df = get_roseville_ceden_benchmark()
+    hist_dir = BASE_DIR / "Raw_data"
+    SOURCES = [
+        {
+            "label": other_sources.SOURCE_CEDEN, "kind": "ceden", "folder": hist_dir / "ceden", "prefix": "dry_creek_watershed_ceden",
+            "default": True,
+            "what": "California's statewide water quality database (State Water Resources Control Board), mostly the state's SWAMP program. "
+            "Stations on Dry Creek and its tributaries.",
+        },
+        {
+            "label": other_sources.SOURCE_ESMR_DRY, "kind": "esmr", "folder": hist_dir / "esmr", "prefix": "roseville_wwtp_esmr",
+            "default": True,
+            "what": "Required creek monitoring by the City of Roseville's Dry Creek wastewater plant, reported to the State Water Board (eSMR). "
+            "Two Dry Creek stations, ~200 ft upstream and downstream of the plant's discharge, ~3 km below JBDC02. Weekly since 2010.",
+        },
+        {
+            "label": other_sources.SOURCE_ESMR_PG, "kind": "esmr", "folder": hist_dir / "esmr", "prefix": "roseville_wwtp_esmr",
+            "default": False,
+            "what": "The same kind of monitoring by Roseville's Pleasant Grove wastewater plant, on Pleasant Grove Creek. "
+            "In Roseville, but a different watershed from Dry Creek.",
+        },
+        {
+            "label": other_sources.SOURCE_USGS, "kind": "usgs", "folder": hist_dir / "usgs", "prefix": "dry_creek_usgs",
+            "default": True,
+            "what": "U.S. Geological Survey: daily stream flow at gauges in the watershed (Dry Creek at Vernon St 1996–2012, Miners Ravine "
+            "1978–1981, a Dry Creek tributary 1963–1967) and a few field samples (2005).",
+        },
+    ]
 
-    st.subheader("Get Historical Records from data.ca.gov")
-    st.markdown(
-        "Queries `data.ca.gov` across **all historical annual CEDEN tables (2000–2026)** using the **Roseville / Dry Creek Watershed "
-        "Geospatial Bounding Box** (`38.70°N–38.85°N`, `-121.40°W to -121.15°W`) so every Roseville station is captured while "
-        "excluding unrelated Dry Creeks in Sonoma or Fresno counties."
+    live_store = st.session_state.setdefault("hist_live", {})
+
+    def _source_data(src):
+        """Live download from this session if there is one, otherwise the newest saved file."""
+        if src["label"] in live_store:
+            d, when = live_store[src["label"]]
+            return d, f"Live download this session ({when})"
+        path = other_sources.latest_file(src["folder"], src["prefix"])
+        if path is None:
+            return pd.DataFrame(columns=other_sources.UNIFIED_COLUMNS), "No saved data yet"
+        d = load_history_file(src["kind"], str(path), path.stat().st_mtime)
+        if src["kind"] == "esmr":
+            d = d[d["Source"] == src["label"]]
+        return d, f"Saved download, {path.name.split('_')[-1][:10]} (`{path.relative_to(BASE_DIR)}`)"
+
+    # ---- choose sources ----
+    src_labels = [s["label"] for s in SOURCES]
+    picked = st.multiselect(
+        "Data sources", src_labels, default=[s["label"] for s in SOURCES if s["default"]],
+        help="Your own JBDC01 / JBDC02 samples are not part of these sources. They stay on the monitoring tabs and can be overlaid on the charts below.",
     )
+    loaded = {s["label"]: _source_data(s) for s in SOURCES}
 
-    discovered_tables = discover_ceden_historical_tables("surface-water-chemistry-results")
-    mode_col1, mode_col2 = st.columns([2, 1])
-    with mode_col1:
-        selected_tables = st.multiselect(
-            "Select Historical CEDEN Annual Tables to Harvest (from data.ca.gov)",
-            options=list(discovered_tables.keys()),
-            default=list(discovered_tables.keys())[:3],
+    summary_rows = []
+    for s in SOURCES:
+        d, note = loaded[s["label"]]
+        summary_rows.append({
+            "Use": "✅" if s["label"] in picked else "",
+            "Source": s["label"],
+            "What it is": s["what"],
+            "Records": f"{len(d):,}",
+            "Stations": d["StationCode"].nunique() if len(d) else 0,
+            "Years": f"{d['SampleDate'].min():%Y}–{d['SampleDate'].max():%Y}" if len(d) and d["SampleDate"].notna().any() else "—",
+            "Data": note,
+        })
+    with st.expander("About these sources", expanded=False):
+        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+        st.caption(
+            "CEDEN and eSMR are published by the State Water Resources Control Board on data.ca.gov. USGS data comes from "
+            "waterservices.usgs.gov and the Water Quality Portal. eSMR doesn't publish station coordinates, so its map locations are approximate."
         )
-    with mode_col2:
-        st.write("")
-        harvest_clicked = st.button("📥 Harvest Selected Historical Years", type="primary", use_container_width=True)
 
-    active_ceden = st.session_state.get("harvested_ceden_df", ceden_bench_df.copy())
-
-    if harvest_clicked and selected_tables:
-        chosen_map = {k: discovered_tables[k] for k in selected_tables}
-        harvested = harvest_multiyear_roseville_history(chosen_map)
-        if not harvested.empty:
-            st.session_state["harvested_ceden_df"] = harvested
-            active_ceden = harvested
-            st.success(
-                f"Downloaded {len(harvested):,} historical Roseville CEDEN records across {harvested['StationCode'].nunique()} stations!"
-            )
+    # ---- refresh from the internet ----
+    with st.expander("🔄 Refresh a source from the internet", expanded=False):
+        st.caption(
+            "Downloads the newest data for this session only. To save a copy for everyone, run the downloader scripts "
+            "(`download_roseville_ceden_history.py`, `download_esmr_usgs_history.py`) and push the new files in `Raw_data/` to GitHub."
+        )
+        which = st.radio("Source", ["CEDEN", "eSMR (both Roseville plants)", "USGS"], horizontal=True)
+        chosen_tables = None
+        if which == "CEDEN":
+            try:
+                all_tables = ceden_year_tables()
+            except Exception as exc:
+                all_tables = []
+                st.error(f"Couldn't reach data.ca.gov: {exc}")
+            if all_tables:
+                r1, r2 = st.columns(2)
+                with r1:
+                    ds_pick = st.multiselect("CEDEN datasets", list(ceden.DATASETS.values()), default=list(ceden.DATASETS.values()))
+                with r2:
+                    yr_pick = st.multiselect("Years (empty = all)", sorted({t["year"] for t in all_tables}, reverse=True), key="ceden_years")
+                chosen_tables = [t for t in all_tables if t["dataset_label"] in ds_pick and (not yr_pick or t["year"] in yr_pick)]
+                st.caption(f"{len(chosen_tables)} table(s). All years takes 1–3 minutes.")
+        elif which.startswith("eSMR"):
+            try:
+                all_tables = esmr_year_tables()
+            except Exception as exc:
+                all_tables = []
+                st.error(f"Couldn't reach data.ca.gov: {exc}")
+            if all_tables:
+                yr_pick = st.multiselect("Years (empty = all)", [t["year"] for t in reversed(all_tables)], key="esmr_years")
+                chosen_tables = [t for t in all_tables if not yr_pick or t["year"] in yr_pick]
+                st.caption(f"{len(chosen_tables)} yearly table(s). eSMR tables are very large: about 30–90 seconds per year.")
         else:
-            st.info(
-                "No live rows returned from data.ca.gov for those tables (or offline); showing bundled Roseville Multi-Creek Benchmark."
-            )
+            st.caption("Downloads USGS daily stream flow and field samples. Takes under a minute.")
 
-    if not active_ceden.empty:
-        dl_col1, dl_col2 = st.columns([3, 1])
-        with dl_col1:
-            ceden_analyte = st.selectbox(
-                "Select CEDEN 2.0 Analyte Across Roseville Stations",
-                options=sorted(active_ceden["Analyte"].dropna().unique().tolist()),
-                index=0,
-            )
-        with dl_col2:
-            st.write("")
-            st.download_button(
-                label="⬇️ Save Historical Roseville CSV",
-                data=active_ceden.to_csv(index=False).encode("utf-8"),
-                file_name="Roseville_Historical_CEDEN_Records.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
+        if st.button("📥 Download", type="primary", disabled=(which != "USGS" and not chosen_tables)):
+            prog = st.progress(0.0, text="Starting download...")
 
-        sub_c = active_ceden[active_ceden["Analyte"] == ceden_analyte].copy()
-        sub_c["SampleDate"] = pd.to_datetime(sub_c["SampleDate"], errors="coerce")
-        sub_c = sub_c.dropna(subset=["SampleDate"]).sort_values("SampleDate")
+            def _tick(done, total, t):
+                prog.progress(done / total, text=f"{t['name']} ({done}/{total})")
 
-        # match the CEDEN analyte name to the field data column so current samples can go on the same chart
-        analyte_to_col = {
-            "Dissolved Oxygen": "DO",
-            "SpecificConductance": "SPC",
-            "Turbidity": "Turbidity",
-            "Temperature, water": "Water Temp",
-            "pH": "PH",
-        }
-        my_col = analyte_to_col.get(ceden_analyte)
-        show_mine = False
-        if my_col:
+            when = pd.Timestamp.now().strftime("%b %d, %Y %I:%M %p")
+            if which == "CEDEN":
+                raw, problems = ceden.harvest(chosen_tables, progress=_tick)
+                new = {other_sources.SOURCE_CEDEN: other_sources.ceden_to_unified(raw)}
+            elif which.startswith("eSMR"):
+                both, problems = other_sources.harvest_esmr(chosen_tables, progress=_tick)
+                new = {lab: both[both["Source"] == lab] for lab in (other_sources.SOURCE_ESMR_DRY, other_sources.SOURCE_ESMR_PG)}
+            else:
+                usgs_df, problems = other_sources.harvest_usgs()
+                new = {other_sources.SOURCE_USGS: usgs_df}
+            prog.empty()
+            if problems:
+                with st.expander(f"⚠️ {len(problems)} part(s) could not be downloaded", expanded=True):
+                    for pr in problems:
+                        st.warning(f"**{pr['table']}**: {pr['error']}")
+            got = {k: v for k, v in new.items() if not v.empty}
+            if got:
+                for k, v in got.items():
+                    v = v.copy()
+                    v["SampleDate"] = pd.to_datetime(v["SampleDate"], errors="coerce")
+                    live_store[k] = (v, when)
+                st.success("Downloaded: " + ", ".join(f"{k} ({len(v):,} records)" for k, v in got.items()))
+                st.rerun()
+            else:
+                st.warning("Nothing came back for that selection.")
+        if live_store and st.button("Go back to the saved downloads"):
+            st.session_state["hist_live"] = {}
+            st.rerun()
+
+    frames = [loaded[lab][0] for lab in picked if not loaded[lab][0].empty]
+    hist = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=other_sources.UNIFIED_COLUMNS)
+
+    if not picked:
+        st.info("Pick at least one data source above.")
+    elif hist.empty:
+        st.info("No saved data for the selected source(s). Use **Refresh a source from the internet** above.")
+    else:
+        # ---- filters ----
+        hist["DataQuality"] = hist["DataQuality"].fillna("Not provided")
+        dq_all = sorted(hist["DataQuality"].unique().tolist())
+        dq_skip = set(ceden.DQ_NOT_MEASUREMENTS + ceden.DQ_REJECTED + ["Extensive review needed"])
+        f1, f2 = st.columns(2)
+        with f1:
+            dq_pick = st.multiselect(
+                "Data quality", dq_all, default=[d for d in dq_all if d not in dq_skip],
+                help="CEDEN rates every record; 'Reject record' and 'MetaData' (QC records) are hidden by default, and 'Extensive review needed' is off by default. "
+                "eSMR data is the plant's own monitoring and isn't rated. USGS marks data approved or provisional/preliminary.",
+            )
+        creek_all = sorted(hist["Creek"].dropna().unique().tolist())
+        with f2:
+            creek_pick = st.multiselect("Creeks", creek_all, default=creek_all)
+        incl_downstream = st.checkbox(
+            "Include stations just downstream of a wastewater discharge (eSMR RSW-002)", value=False,
+            help="These show the creek after treated wastewater mixes in (conductivity is higher), so they aren't normal creek conditions.",
+        )
+        view = hist[hist["DataQuality"].isin(dq_pick) & hist["Creek"].isin(creek_pick)]
+        if not incl_downstream:
+            view = view[~view["StationNote"].fillna("").str.contains("downstream of the wastewater discharge")]
+        view = view.dropna(subset=["Result", "SampleDate"])
+
+        # ---- what's available ----
+        st.subheader("What's Available")
+        field = view[view["Parameter"].notna()]
+        flow = view[view["Analyte"].fillna("").str.startswith("Stream flow")]
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("Records", f"{len(view):,}")
+        a2.metric("Stations", view["StationCode"].nunique())
+        a3.metric("Years Covered", f"{view['SampleDate'].min():%Y} – {view['SampleDate'].max():%Y}" if len(view) else "—")
+        a4.metric("Field Parameter Records", f"{len(field):,}", help="DO, conductivity, pH, turbidity, and water temperature")
+
+        if not field.empty or not flow.empty:
+            avail_src = pd.concat([field.assign(P=field["Parameter"]), flow.assign(P="Flow")], ignore_index=True)
+            avail = (
+                avail_src.groupby(["Source", "Creek", "P"])
+                .agg(records=("Result", "size"), first=("SampleDate", "min"), last=("SampleDate", "max"))
+                .reset_index()
+            )
+            avail["Cell"] = avail["records"].map("{:,}".format) + " (" + avail["first"].dt.year.astype(str) + "–" + avail["last"].dt.year.astype(str) + ")"
+            grid = avail.pivot(index=["Source", "Creek"], columns="P", values="Cell")
+            col_order = [c for c in list(ceden.PARAMETERS) + ["Flow"] if c in grid.columns]
+            grid = grid.reindex(columns=col_order).fillna("—")
+            grid.columns = [ceden.PARAMETER_LABELS.get(c, "Stream Flow (cfs)") for c in grid.columns]
+            st.markdown("**Records by source and creek** (number of records, and the years they cover)")
+            st.dataframe(grid, use_container_width=True, height=min(36 * (len(grid) + 1) + 4, 640))
+
+        with st.expander("Stations and map"):
+            stations = (
+                view.groupby(["Source", "StationCode", "StationName", "Creek"], dropna=False)
+                .agg(Records=("Result", "size"), First=("SampleDate", "min"), Last=("SampleDate", "max"),
+                     Lat=("Latitude", "mean"), Lon=("Longitude", "mean"), Approx=("LocationApproximate", "max"),
+                     Note=("StationNote", "first"))
+                .reset_index()
+                .sort_values("Records", ascending=False)
+            )
+            src_colors = {other_sources.SOURCE_CEDEN: "#5F6368", other_sources.SOURCE_ESMR_DRY: "#E37400",
+                          other_sources.SOURCE_ESMR_PG: "#A142F4", other_sources.SOURCE_USGS: "#188038"}
+            smap = folium.Map(location=[38.76, -121.30], zoom_start=11)
+            for _, srow in stations.dropna(subset=["Lat", "Lon"]).iterrows():
+                folium.CircleMarker(
+                    location=[srow["Lat"], srow["Lon"]], radius=6, color=src_colors.get(srow["Source"], "#5F6368"),
+                    fill=True, fill_opacity=0.75,
+                    tooltip=f"{srow['Source']}: {srow['StationName']} ({srow['Records']:,} records, {srow['First']:%Y}–{srow['Last']:%Y})"
+                    + (" — approximate location" if srow["Approx"] else ""),
+                ).add_to(smap)
+            for lat, lon, lab in [(38.752945, -121.241526, "DCC site JBDC01 Miners Ravine"), (38.742738, -121.284156, "DCC site JBDC02 Saugstad Park")]:
+                folium.CircleMarker(location=[lat, lon], radius=9, color="#1A73E8", fill=True, fill_opacity=0.9, tooltip=lab).add_to(smap)
+            st_folium(smap, height=400, use_container_width=True, returned_objects=[], key="hist_station_map")
+            st.caption("Blue = DCC sites · Gray = CEDEN · Orange = Dry Creek WWTP (eSMR, approximate) · Purple = Pleasant Grove WWTP (eSMR, approximate) · Green = USGS")
+            show_st = stations.drop(columns=["Lat", "Lon", "Approx"]).copy()
+            show_st["First"] = show_st["First"].dt.strftime("%Y-%m-%d")
+            show_st["Last"] = show_st["Last"].dt.strftime("%Y-%m-%d")
+            st.dataframe(show_st, use_container_width=True, hide_index=True)
+
+        # ---- compare with current samples ----
+        st.subheader("Compare Current Samples with the Historical Record")
+        params_with_data = [p for p in ceden.PARAMETERS if (field["Parameter"] == p).any()]
+        if not params_with_data:
+            st.info("None of the selected records are DO, conductivity, pH, turbidity, or water temperature.")
+        else:
+            pcol = st.selectbox("Parameter", params_with_data, format_func=lambda c: ceden.PARAMETER_LABELS[c])
             show_mine = st.checkbox("Show current JBDC01 / JBDC02 samples on top of the historical data", value=True)
+            sub_c = field[field["Parameter"] == pcol].sort_values("SampleDate")
 
-        if HAS_PLOTLY:
-            fig_ceden = px.line(
-                sub_c,
-                x="SampleDate",
-                y="Result",
-                color="Creek",
-                line_group="StationCode",
-                markers=True,
-                hover_data=["StationCode", "StationName"],
-                title=f"Roseville Creeks Historical Record — {ceden_analyte}",
+            if HAS_PLOTLY:
+                fig_h = px.scatter(
+                    sub_c, x="SampleDate", y="Result", color="Creek", symbol="Source",
+                    hover_data=["StationName", "Source", "DataQuality"], opacity=0.6,
+                    title=f"Historical Record: {ceden.PARAMETER_LABELS[pcol]}",
+                )
+                fig_h.update_traces(marker=dict(size=6))
+                if pcol in THRESHOLD_ZONES:
+                    for y0, y1, fill_rgba, _lab in THRESHOLD_ZONES[pcol]["bands"]:
+                        fig_h.add_hrect(y0=y0, y1=y1, fillcolor=fill_rgba, line_width=0, layer="below")
+                if show_mine:
+                    for site_df, name, colr in [
+                        (miners_ravine, "Current samples: Miners Ravine (JBDC01)", "#1A73E8"),
+                        (dry_creek, "Current samples: Dry Creek (JBDC02)", "#111111"),
+                    ]:
+                        fig_h.add_trace(go.Scatter(
+                            x=site_df["Date"], y=site_df[pcol], mode="markers", name=name,
+                            marker=dict(size=14, symbol="star", color=colr, line=dict(width=1, color="white")),
+                        ))
+                fig_h.update_layout(xaxis_title="Sample Date", yaxis_title=ceden.PARAMETER_LABELS[pcol], height=480)
+                st.plotly_chart(fig_h, use_container_width=True)
+            else:
+                fig_c, ax_c = plt.subplots(figsize=(8.0, 4.2))
+                sns.scatterplot(data=sub_c, x="SampleDate", y="Result", hue="Creek", style="Source", ax=ax_c, alpha=0.6)
+                if show_mine:
+                    ax_c.scatter(miners_ravine["Date"], miners_ravine[pcol], marker="*", s=160, color="#1A73E8", label="Current samples: JBDC01")
+                    ax_c.scatter(dry_creek["Date"], dry_creek[pcol], marker="*", s=160, color="black", label="Current samples: JBDC02")
+                    ax_c.legend()
+                ax_c.set_title(f"Historical Record: {ceden.PARAMETER_LABELS[pcol]}")
+                st.pyplot(fig_c)
+                plt.close(fig_c)
+
+            cur_months = sorted(set(miners_ravine["Date"].dt.month) | set(dry_creek["Date"].dt.month))
+            month_names = ", ".join(pd.Timestamp(2000, m_, 1).strftime("%b") for m_ in cur_months)
+            same_season = st.checkbox(
+                f"Only compare the same months as the current samples ({month_names})", value=True,
+                help="Creeks are warmer with less oxygen in summer, so comparing summer samples to all-year history isn't fair.",
             )
-            if show_mine:
-                for site_df, name, colr in [
-                    (miners_ravine, "Current samples: Miners Ravine (JBDC01)", "#1A73E8"),
-                    (dry_creek, "Current samples: Dry Creek (JBDC02)", "#111111"),
-                ]:
-                    fig_ceden.add_trace(
-                        go.Scatter(
-                            x=site_df["Date"],
-                            y=site_df[my_col],
-                            mode="markers",
-                            name=name,
-                            marker=dict(size=11, symbol="star", color=colr, line=dict(width=1, color="white")),
-                        )
-                    )
-            st.plotly_chart(fig_ceden, use_container_width=True)
-        else:
-            fig_c, ax_c = plt.subplots(figsize=(8.0, 4.2))
-            sns.lineplot(data=sub_c, x="SampleDate", y="Result", hue="Creek", marker="o", ax=ax_c)
-            if show_mine:
-                ax_c.scatter(miners_ravine["Date"], miners_ravine[my_col], marker="*", s=120, color="#1A73E8", label="Current samples: JBDC01")
-                ax_c.scatter(dry_creek["Date"], dry_creek[my_col], marker="*", s=120, color="black", label="Current samples: JBDC02")
-                ax_c.legend()
-            ax_c.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
-            ax_c.set_title(f"Roseville Creeks Historical Record — {ceden_analyte}")
-            st.pyplot(fig_c)
+            cmp_src = sub_c[sub_c["SampleDate"].dt.month.isin(cur_months)] if same_season else sub_c
 
-        if show_mine and not sub_c.empty:
-            hist_vals = pd.to_numeric(sub_c["Result"], errors="coerce").dropna()
-            mine_vals = pd.concat([miners_ravine[my_col], dry_creek[my_col]]).dropna()
-            h1, h2, h3 = st.columns(3)
-            h1.metric("Historical median", f"{hist_vals.median():.2f}")
-            h2.metric("Historical range", f"{hist_vals.min():.2f} – {hist_vals.max():.2f}")
-            h3.metric("Current samples median", f"{mine_vals.median():.2f}")
+            def _km(lat1, lon1, lat2, lon2):
+                p = math.pi / 180
+                a = math.sin((lat2 - lat1) * p / 2) ** 2 + math.cos(lat1 * p) * math.cos(lat2 * p) * math.sin((lon2 - lon1) * p / 2) ** 2
+                return 12742 * math.asin(math.sqrt(a))
+
+            def _summ(rows):
+                h = rows["Result"]
+                return {
+                    "Records": len(h),
+                    "Median": round(h.median(), 2) if len(h) else None,
+                    "Middle 50%": f"{h.quantile(0.25):.2f} – {h.quantile(0.75):.2f}" if len(h) >= 4 else "—",
+                    "Years": f"{rows['SampleDate'].min():%Y}–{rows['SampleDate'].max():%Y}" if len(h) else "—",
+                }
+
+            # same-creek comparison: each DCC site vs. nearby stations and vs. the whole creek, per source
+            st.markdown("**Same-creek comparison**")
+            cmp_rows = []
+            for site_df, site_name, creek, s_lat, s_lon in [
+                (miners_ravine, "JBDC01 Miners Ravine", "Miners Ravine", 38.752945, -121.241526),
+                (dry_creek, "JBDC02 Saugstad Park", "Dry Creek", 38.742738, -121.284156),
+            ]:
+                mine = site_df[pcol].dropna()
+                base = {"DCC site": site_name, "Current samples": len(mine),
+                        "Current median": round(mine.median(), 2) if len(mine) else None}
+                creek_rows = cmp_src[cmp_src["Creek"] == creek]
+                if creek_rows.empty:
+                    continue
+                dist = pd.Series(
+                    [_km(s_lat, s_lon, la, lo) if pd.notna(la) and pd.notna(lo) else 99 for la, lo in zip(creek_rows["Latitude"], creek_rows["Longitude"])],
+                    index=creek_rows.index, dtype=float,
+                )
+                near = creek_rows.loc[dist <= 2.0]
+                if not near.empty:
+                    cmp_rows.append({**base, "Compared with": "Stations within 2 km (all selected sources)", **_summ(near)})
+                for src_lab, rows in creek_rows.groupby("Source"):
+                    cmp_rows.append({**base, "Compared with": f"All of {creek}: {src_lab}", **_summ(rows)})
+            if cmp_rows:
+                st.dataframe(pd.DataFrame(cmp_rows), use_container_width=True, hide_index=True)
+            else:
+                st.caption("No historical records for Miners Ravine or Dry Creek in the current selection.")
+
+            # same-week comparison: other programs' readings within 4 days of a DCC sample, on the same creek
+            wk_rows = []
+            for site_df, site_name, creek in [(miners_ravine, "JBDC01", "Miners Ravine"), (dry_creek, "JBDC02", "Dry Creek")]:
+                creek_all = sub_c[sub_c["Creek"] == creek]
+                for _, srow in site_df.dropna(subset=[pcol]).iterrows():
+                    near_t = creek_all[(creek_all["SampleDate"] - srow["Date"]).abs() <= pd.Timedelta(days=4)]
+                    for _, h in near_t.iterrows():
+                        wk_rows.append({
+                            "DCC site": site_name, "DCC date": srow["Date"].strftime("%Y-%m-%d"), "DCC value": srow[pcol],
+                            "Other station": h["StationName"], "Source": h["Source"],
+                            "Their date": h["SampleDate"].strftime("%Y-%m-%d"), "Their value": round(h["Result"], 2),
+                            "Difference (DCC − theirs)": round(srow[pcol] - h["Result"], 2),
+                        })
+            if wk_rows:
+                st.markdown("**Same-week readings on the same creek** (other programs' readings within 4 days of a DCC sample)")
+                st.dataframe(pd.DataFrame(wk_rows), use_container_width=True, hide_index=True)
+
+            # trend over time in the same months
+            if not cmp_src.empty:
+                st.markdown(f"**Trend over time** (median {ceden.PARAMETER_LABELS[pcol]}" + (f", {month_names} only)" if same_season else ")"))
+                tr = cmp_src.copy()
+                tr["Period"] = pd.cut(
+                    tr["SampleDate"].dt.year, [1949, 1999, 2004, 2009, 2014, 2019, 2023, 2100],
+                    labels=["Before 2000", "2000–04", "2005–09", "2010–14", "2015–19", "2020–23", "2024+"],
+                )
+                trend = tr.pivot_table(index=["Source", "Creek"], columns="Period", values="Result", aggfunc="median", observed=True).round(2)
+                counts = tr.pivot_table(index=["Source", "Creek"], columns="Period", values="Result", aggfunc="size", observed=True)
+                trend_show = trend.astype(object).where(trend.isna(), trend.astype(str) + " (n=" + counts.astype("Int64").astype(str) + ")")
+                trend_show.columns = [str(c) for c in trend_show.columns]  # plain text headers (categorical ones don't serialize)
+                st.dataframe(trend_show.fillna("—"), use_container_width=True)
+
+            st.caption(
+                "Other programs sampled at different spots, times of day, and frequencies (for example, the Dry Creek plant measured DO weekly "
+                "until 2019, then monthly). Use these comparisons as context, not as a strict before-and-after test."
+            )
+
+        with st.expander("Explore any other measurement (including USGS stream flow)"):
+            other = view[view["Parameter"].isna()]
+            if other.empty:
+                st.caption("No other measurements in the selected records.")
+            else:
+                counts = other.groupby(["Analyte", "Unit"]).size().sort_values(ascending=False)
+                labels = [f"{a} ({u}): {n:,} records" for (a, u), n in counts.items()]
+                pick = st.selectbox("Measurement", labels)
+                a_sel, u_sel = counts.index[labels.index(pick)]
+                o = other[(other["Analyte"] == a_sel) & (other["Unit"] == u_sel)].sort_values("SampleDate")
+                if HAS_PLOTLY:
+                    if a_sel.startswith("Stream flow"):
+                        figo = px.line(o, x="SampleDate", y="Result", color="StationName", title=f"{a_sel} ({u_sel})")
+                        figo.update_yaxes(type="log", title="cfs (log scale)")
+                    else:
+                        figo = px.scatter(o, x="SampleDate", y="Result", color="Creek", symbol="Source",
+                                          hover_data=["StationName", "DataQuality"], title=f"{a_sel} ({u_sel})")
+                    st.plotly_chart(figo, use_container_width=True)
+                else:
+                    st.scatter_chart(o, x="SampleDate", y="Result", color="Creek")
+
+        st.download_button(
+            label="⬇️ Download These Historical Records (CSV)",
+            data=view.to_csv(index=False).encode("utf-8"),
+            file_name="Roseville_Area_Historical_Records.csv",
+            mime="text/csv",
+        )
