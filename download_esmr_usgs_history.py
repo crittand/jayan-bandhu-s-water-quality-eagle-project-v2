@@ -1,34 +1,26 @@
 #!/usr/bin/env python3
 """
-Roseville-Area Monitoring Data from eSMR and USGS
-=================================================
-Downloads two more sources of historical creek data for the dashboard's Historical
-Analysis tab (CEDEN is handled by download_roseville_ceden_history.py):
+Gets the other historical sources for the Historical tab (CEDEN is in download_roseville_ceden_history.py)
 
-1. eSMR (Electronic Self-Monitoring Reports) - State Water Resources Control Board,
-   https://data.ca.gov/dataset/water-quality-effluent-electronic-self-monitoring-report-esmr-data
-   Wastewater plants with discharge permits must measure the creek they discharge into.
-   The City of Roseville runs two plants that do this:
-     - Dry Creek WWTP (facility 220768) on Dry Creek
-     - Pleasant Grove WWTP (facility 248706) on Pleasant Grove Creek (a different watershed)
-   Each has two "receiving water" stations:
-     RSW-001 ~200 ft upstream of the discharge (normal creek conditions)
-     RSW-002 ~200 ft downstream of the discharge (affected by treated wastewater)
-   Note: eSMR has no coordinates for these stations, so approximate ones are used for maps.
-   eSMR also labels the Dry Creek plant's creek "in the Russian River Watershed"; that is a
-   data-entry error (the record is filed under Region 5S - Sacramento).
+1) eSMR - wastewater plant self-monitoring reports, State Water Board, on data.ca.gov
+   Plants with a discharge permit have to sample the creek they discharge into. Roseville has 2:
+     Dry Creek WWTP (facility 220768)       -> Dry Creek
+     Pleasant Grove WWTP (facility 248706)  -> Pleasant Grove Creek (different watershed)
+   each one has RSW-001 (~200ft upstream of the outfall = normal creek) and RSW-002 (~200ft
+   downstream, treated wastewater mixed in).
+   - eSMR doesnt give coordinates for these, so the map uses approximate spots
+   - eSMR says the Dry Creek plant is "in the Russian River Watershed". thats wrong (typo on
+     their end), it's filed under Region 5S Sacramento
 
-2. USGS (U.S. Geological Survey)
-     - Daily stream flow from gauges in the Dry Creek Watershed (waterservices.usgs.gov)
-     - Field water quality samples at USGS sites in the watershed (Water Quality Portal,
-       waterqualitydata.us)
+2) USGS - daily stream flow from the gauges in the watershed + field samples from the
+   Water Quality Portal
 
-Usage in VS Code Terminal:
-    python3 download_esmr_usgs_history.py            # both sources
-    python3 download_esmr_usgs_history.py esmr       # only eSMR (takes ~5-10 minutes)
-    python3 download_esmr_usgs_history.py usgs       # only USGS (under a minute)
+run:
+    python3 download_esmr_usgs_history.py          both
+    python3 download_esmr_usgs_history.py esmr     just eSMR (slow, 5-10 min, the tables are huge)
+    python3 download_esmr_usgs_history.py usgs     just USGS (<1 min)
 
-Saves new dated files (never overwrites earlier downloads):
+saves new dated files, never overwrites:
     Raw_data/esmr/roseville_wwtp_esmr_YYYY-MM-DD.csv.gz
     Raw_data/usgs/dry_creek_usgs_YYYY-MM-DD.csv.gz
 """
@@ -53,7 +45,7 @@ BASE_DIR = Path(__file__).parent
 ESMR_DIR = BASE_DIR / "Raw_data" / "esmr"
 USGS_DIR = BASE_DIR / "Raw_data" / "usgs"
 
-# every historical source is saved / loaded with these columns
+# all the historical sources get saved with these same columns
 UNIFIED_COLUMNS = [
     "Source", "Agency", "StationCode", "StationName", "StationNote", "Creek", "Watershed",
     "SampleDate", "SampleTime", "Parameter", "Analyte", "Unit", "Result", "ResultQualifier",
@@ -71,13 +63,13 @@ ESMR_FACILITIES = {
     220768: {
         "source": SOURCE_ESMR_DRY, "agency": "City of Roseville (Dry Creek WWTP)",
         "creek": "Dry Creek", "watershed": "Dry Creek",
-        # approximate: CEDEN's "Dry Creek at Roseville WWTP" station (eSMR has no coordinates)
+        # approx - using CEDEN's "Dry Creek at Roseville WWTP" station spot
         "lat": 38.7341, "lon": -121.3144,
     },
     248706: {
         "source": SOURCE_ESMR_PG, "agency": "City of Roseville (Pleasant Grove WWTP)",
         "creek": "Pleasant Grove Creek", "watershed": "Pleasant Grove Creek",
-        # approximate: CEDEN's Pleasant Grove Creek receiving-water site near the plant
+        # approx - CEDEN pleasant grove receiving water site by the plant
         "lat": 38.7948, "lon": -121.3725,
     },
 }
@@ -86,7 +78,7 @@ ESMR_STATION_NOTES = {
     "RSW-002": "~200 ft downstream of the wastewater discharge (affected by treated wastewater)",
 }
 ESMR_PARAMETERS = {
-    # eSMR parameter name -> (dashboard parameter, accepted units)
+    # eSMR name -> (our param, units)
     "Dissolved Oxygen": ("DO", ["mg/L"]),
     "Electrical Conductivity @ 25 Deg. C": ("SPC", ["umhos/cm", "uS/cm"]),
     "Specific Conductance": ("SPC", ["umhos/cm", "uS/cm"]),
@@ -101,12 +93,12 @@ ESMR_COLUMNS = [
 
 # ---------------------------------------------------------------------------- USGS
 USGS_FLOW_SITES = {
-    # site number -> (name, creek); all inside the Dry Creek Watershed
+    # site no -> (name, creek)
     "11447293": ("Dry Creek at Vernon St Bridge at Roseville", "Dry Creek"),
     "11447270": ("Miners Ravine near Loomis", "Miners Ravine"),
     "11447300": ("Dry Creek Tributary near Roseville", "Dry Creek"),
 }
-# Dry Creek Watershed box (same as the CEDEN downloader) for finding USGS water quality sites
+# same box as the CEDEN script
 BBOX = (-121.48, 38.64, -121.08, 38.90)
 USGS_WQ_NAME_TO_CREEK = {
     "DRY C": "Dry Creek", "MINERS RAVINE": "Miners Ravine", "SECRET RAVINE": "Secret Ravine",
@@ -143,7 +135,6 @@ def _ckan(path: str, timeout: int = 180) -> dict:
 
 # ---------------------------------------------------------------------------- eSMR download
 def esmr_year_tables() -> list[dict]:
-    """Yearly eSMR tables (skips the bulk all-years files)."""
     res = _ckan(f"package_show?id={ESMR_PACKAGE}", timeout=30)["result"]["resources"]
     out = []
     for r in res:
@@ -196,7 +187,7 @@ def esmr_to_unified(raw: pd.DataFrame) -> pd.DataFrame:
         hit = ESMR_PARAMETERS.get(a)
         params.append(hit[0] if hit and u in hit[1] else None)
     out["Parameter"] = params
-    # temperature: convert °F to °C, then drop the °F copies (2010-2019 reports listed both)
+    # 2010-2019 reports have temp in BOTH F and C. convert F, then drop the dupes
     is_f = (out["Parameter"] == "Water Temp") & (out["Unit"] == "Degrees F")
     out.loc[is_f, "Result"] = (out.loc[is_f, "Result"] - 32) * 5 / 9
     out.loc[is_f, "Unit"] = "Degrees C"
@@ -257,7 +248,7 @@ def fetch_usgs_flow() -> pd.DataFrame:
 
 
 def fetch_usgs_water_quality() -> pd.DataFrame:
-    """Field water quality at USGS sites in the watershed box, via the Water Quality Portal."""
+    # water quality portal: find USGS stream sites in the box, keep the ones named after our creeks
     bbox = ",".join(str(x) for x in BBOX)
     chars = "&".join("characteristicName=" + urllib.parse.quote(c) for c in USGS_WQ_CHARACTERISTICS)
     st_url = f"https://www.waterqualitydata.us/data/Station/search?bBox={bbox}&organization=USGS-CA&siteType=Stream&mimeType=csv"
@@ -318,7 +309,6 @@ def latest_file(folder: Path, prefix: str) -> Path | None:
 
 
 def ceden_to_unified(df: pd.DataFrame) -> pd.DataFrame:
-    """Puts a saved CEDEN download (from download_roseville_ceden_history.py) into the shared column layout."""
     if df.empty:
         return pd.DataFrame(columns=UNIFIED_COLUMNS)
     out = pd.DataFrame({

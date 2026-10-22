@@ -1,36 +1,23 @@
 #!/usr/bin/env python3
 """
-Dry Creek Watershed CEDEN Downloader
-====================================
-Downloads water quality records for the Dry Creek Watershed (Roseville / Placer &
-Sacramento counties) from California's CEDEN data, published by the State Water
-Resources Control Board on the California Open Data Portal (https://data.ca.gov).
+Pulls CEDEN water quality records for the Dry Creek watershed (Roseville) off data.ca.gov
+(State Water Resources Control Board). Searches every year of:
+  - Surface Water - Chemistry Results
+  - Surface Water - Habitat Results
+  - Surface Water - Chemistry Results - CEDEN Augmentation  (newer stuff not loaded into CEDEN yet)
 
-Datasets searched (one table per year in each):
-  - Surface Water - Chemistry Results                     (field + lab chemistry)
-  - Surface Water - Habitat Results                       (field / habitat measures)
-  - Surface Water - Chemistry Results - CEDEN Augmentation (data submitted since 2020
-    that hasn't been loaded into the main CEDEN tables yet; provisional)
+Column names come from the CEDEN data dictionaries on data.ca.gov. NOTE the lat/long
+columns are "Latitude" / "Longitude" -- "Target Latitude" is just the label. The old
+version used the label and every request failed (and the error got swallowed)
 
-Column names follow the official CEDEN data dictionaries published with those
-datasets (e.g. the station position columns are "Latitude" / "Longitude"; the
-dictionary *label* is "Target Latitude", which is why older code got it wrong).
+Which stations count:
+  inside a box around the watershed (Rio Linda -> Loomis/Granite Bay) AND the station
+  name has one of the watershed creeks in it (list from DCC's sub-watershed map).
+  Storm drains / outfalls / Steelhead Creek are skipped. The box keeps out the other
+  "Dry Creeks" (Sonoma etc), the names keep out Pleasant Grove, Arcade, Auburn Ravine...
 
-Which stations count as "Dry Creek Watershed":
-  1. Inside a box around the watershed (Rio Linda to Loomis / Granite Bay), AND
-  2. Station name contains one of the watershed's creeks (from DCC's sub-watershed
-     map): Dry Creek, Secret Ravine, Miners Ravine, Antelope Creek, Clover Valley
-     Creek, Linda Creek, Cirby Creek, Strap Ravine, Sucker Ravine.
-  Storm drain / outfall stations and Steelhead Creek (downstream of where Dry Creek
-  ends) are left out. The box keeps out other "Dry Creeks" (Sonoma, Fresno, etc.),
-  and the name check keeps out nearby creeks in other watersheds (Pleasant Grove,
-  Arcade, Auburn Ravine, Folsom Lake ...).
-
-Usage in VS Code Terminal:
-    python3 download_roseville_ceden_history.py
-
-Saves a new dated file each run (never overwrites an older download):
-    Raw_data/ceden/dry_creek_watershed_ceden_YYYY-MM-DD.csv.gz   (gzip-compressed CSV)
+run:   python3 download_roseville_ceden_history.py
+saves: Raw_data/ceden/dry_creek_watershed_ceden_YYYY-MM-DD.csv.gz  (new file every time, never overwrites)
 """
 
 from __future__ import annotations
@@ -56,11 +43,11 @@ DATASETS = {
     "surface-water-chemistry-results-ceden-augmentation": "Chemistry (Augmentation)",
 }
 
-# Dry Creek Watershed box (decimal degrees)
+# watershed box
 LAT_MIN, LAT_MAX = 38.64, 38.90
 LON_MIN, LON_MAX = -121.48, -121.08
 
-# creek name -> how it shows up in CEDEN station names
+# creek -> how it shows up in station names
 WATERSHED_CREEKS = {
     "Dry Creek": ["Dry Creek", "Dry Cr."],
     "Secret Ravine": ["Secret Ravine"],
@@ -74,7 +61,7 @@ WATERSHED_CREEKS = {
 }
 EXCLUDE_NAME_PATTERNS = ["Storm Drain", "Outfall", "Steelhead Creek"]
 
-# columns that exist in all three datasets (checked against each table's field list)
+# columns that exist in all 3 datasets (habitat has no ResultsReplicate so its not here)
 COLUMNS = [
     "Program", "Project", "SampleAgency", "StationCode", "StationName", "SampleDate",
     "CollectionTime", "MatrixName", "MethodName", "SampleTypeCode", "Analyte", "Unit",
@@ -82,14 +69,12 @@ COLUMNS = [
     "Longitude", "Datum", "CollectionReplicate",
 ]
 
-# CEDEN "DataQuality" categories. The data dictionary lists "Passed QC", "Reject Data", and
-# "Metadata, QC record", but the published tables actually use "Passed", "Reject record", and
-# "MetaData", so both spellings are listed.
+# DataQuality values. dictionary says "Passed QC"/"Reject Data"/"Metadata, QC record" but the
+# actual tables say "Passed"/"Reject record"/"MetaData". so both spellings :/
 DQ_NOT_MEASUREMENTS = ["Metadata, QC record", "MetaData"]
 DQ_REJECTED = ["Reject Data", "Reject record"]
 
-# Field parameters the dashboard measures -> how to recognize them in CEDEN.
-# (analyte name prefix, accepted units)
+# our 5 field params -> (CEDEN analyte prefix, units we accept)
 PARAMETERS = {
     "DO": ("Oxygen, Dissolved", ["mg/L"]),
     "SPC": ("SpecificConductivity", ["uS/cm", "umhos/cm", "µS/cm"]),
@@ -106,11 +91,10 @@ PARAMETER_LABELS = {
 }
 
 RAW_DIR = Path(__file__).parent / "Raw_data" / "ceden"
-PAGE_SIZE = 30000  # data.ca.gov caps a SQL result at 32,000 rows
+PAGE_SIZE = 30000  # data.ca.gov caps sql results at 32k rows
 
 
 def _api(path: str, timeout: int = 120, retries: int = 3) -> dict:
-    """GET a CKAN action. Query errors (HTTP 409) are raised with CKAN's message (after retrying timeouts)."""
     last = None
     for attempt in range(retries):
         try:
@@ -125,20 +109,20 @@ def _api(path: str, timeout: int = 120, retries: int = 3) -> dict:
                 except Exception:
                     msg = body[:300]
                 last = f"data.ca.gov rejected the query (HTTP {exc.code}): {str(msg)[:300]}"
-                # "Query took too long" is the server being busy -> wait and try again; anything else is a real error
+                # "Query took too long" = server is busy, wait + retry. anything else is a real error
                 if "took too long" not in str(msg).lower():
                     raise RuntimeError(last) from None
                 time.sleep(10 * (attempt + 1))
                 continue
             last = f"HTTP {exc.code}"
-        except Exception as exc:  # timeouts, network blips
+        except Exception as exc:  # timeouts etc
             last = f"{type(exc).__name__}: {exc}"
         time.sleep(2 * (attempt + 1))
     raise RuntimeError(last if last and last.startswith("data.ca.gov") else f"data.ca.gov did not respond ({last})")
 
 
 def list_year_tables(datasets: list[str] | None = None) -> list[dict]:
-    """All yearly CEDEN tables for the chosen datasets (skips the bulk 'All Years' files)."""
+    # skip the giant "All Years" bulk files, the yearly ones have the same data
     out = []
     for pkg in datasets or list(DATASETS):
         resources = _api(f"package_show?id={urllib.parse.quote(pkg)}", timeout=30)["result"]["resources"]
@@ -152,7 +136,7 @@ def list_year_tables(datasets: list[str] | None = None) -> list[dict]:
             elif "Prior to 2000" in name:
                 year = "Before 2000"
             else:
-                year = "2020 onward"  # the augmentation table isn't split by year
+                year = "2020 onward"  # augmentation is one big table
             out.append({"dataset": pkg, "dataset_label": DATASETS[pkg], "name": name, "id": r["id"], "year": year})
     return out
 
@@ -168,14 +152,13 @@ def _station_filter_sql() -> str:
 
 
 def fetch_table(resource_id: str) -> pd.DataFrame:
-    """Download all Dry Creek Watershed rows from one CEDEN table."""
     cols = ", ".join(f'"{c}"' for c in COLUMNS)
     base = f'SELECT {cols} FROM "{resource_id}" WHERE {_station_filter_sql()}'
-    # one plain query is enough almost always (sorting makes big tables time out)
+    # one plain query is almost always enough (ORDER BY made the 2024 table time out)
     records = _api("datastore_search_sql?sql=" + urllib.parse.quote(f"{base} LIMIT {PAGE_SIZE}"))["result"]["records"]
     if len(records) < PAGE_SIZE:
         return pd.DataFrame(records) if records else pd.DataFrame(columns=COLUMNS)
-    # more rows than one page (data.ca.gov caps a result at 32,000) -> page through in a fixed order
+    # more than 1 page -> page through it sorted
     frames, offset = [], 0
     while True:
         sql = f'{base} ORDER BY "_id" LIMIT {PAGE_SIZE} OFFSET {offset}'
@@ -189,7 +172,7 @@ def fetch_table(resource_id: str) -> pd.DataFrame:
 
 
 def creek_for_station(station_name: str) -> str:
-    """Creek = whichever watershed creek name appears first in the station name."""
+    # whichever creek name shows up FIRST in the station name ("Cirby Creek above Linda Cr." -> Cirby)
     s = str(station_name).lower()
     best, pos = "Other (Dry Creek Watershed)", len(s) + 1
     for creek, pats in WATERSHED_CREEKS.items():
@@ -201,8 +184,7 @@ def creek_for_station(station_name: str) -> str:
 
 
 def parameter_for(analyte: str, unit: str, matrix: str = "samplewater") -> str | None:
-    """Map a CEDEN analyte + unit to one of the dashboard's 5 field parameters (or None).
-    Only creek water counts (MatrixName 'samplewater'), so air temperature and lab blanks are left out."""
+    # only creek water (samplewater) - there are air temps and lab blanks in there too
     if str(matrix).lower() != "samplewater":
         return None
     a, u = str(analyte), str(unit)
@@ -215,17 +197,16 @@ def parameter_for(analyte: str, unit: str, matrix: str = "samplewater") -> str |
 
 
 def clean(df: pd.DataFrame) -> pd.DataFrame:
-    """Apply the CEDEN data dictionary rules and add Creek / Parameter columns."""
     if df.empty:
         return df
     df = df.copy()
     df["Result"] = pd.to_numeric(df["Result"], errors="coerce")
-    df.loc[df["Result"] == -88, "Result"] = pd.NA  # -88 = "not recorded"
+    df.loc[df["Result"] == -88, "Result"] = pd.NA  # -88 means not recorded
     df["SampleDate"] = pd.to_datetime(df["SampleDate"], errors="coerce", format="mixed").dt.tz_localize(None)
-    df.loc[df["SampleDate"] == pd.Timestamp("1950-01-01"), "SampleDate"] = pd.NaT  # 1950-01-01 = unknown date
+    df.loc[df["SampleDate"] == pd.Timestamp("1950-01-01"), "SampleDate"] = pd.NaT  # 1/1/1950 = unknown date
     df["Creek"] = df["StationName"].apply(creek_for_station)
     df["Parameter"] = [parameter_for(a, u, m) for a, u, m in zip(df["Analyte"], df["Unit"], df["MatrixName"])]
-    # put temperature in °C everywhere
+    # F -> C
     is_f = (df["Parameter"] == "Water Temp") & (df["Unit"] == "Deg F")
     df.loc[is_f, "Result"] = (df.loc[is_f, "Result"] - 32) * 5 / 9
     df.loc[is_f, "Unit"] = "Deg C"
@@ -233,11 +214,7 @@ def clean(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def harvest(tables: list[dict], progress=None, workers: int = 3) -> tuple[pd.DataFrame, list[dict]]:
-    """
-    Download + clean the given tables. Returns (data, problems).
-    `progress(done, total, table)` is called after each table if given.
-    Problems are returned, not hidden, so the caller can show them.
-    """
+    # returns (data, problems). problems get passed back so the app can SHOW them (old code hid them)
     frames, problems = [], []
     done = 0
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -282,9 +259,9 @@ def main() -> None:
         print("\nNo records downloaded. Nothing saved.")
         return
 
-    # gzip keeps the file small enough for GitHub (pandas reads .csv.gz directly)
+    # gzip so the repo doesnt get huge, pandas reads .csv.gz fine
     out_csv = RAW_DIR / f"dry_creek_watershed_ceden_{date.today():%Y-%m-%d}.csv.gz"
-    if out_csv.exists():  # second run on the same day -> keep both
+    if out_csv.exists():  # ran twice in one day, keep both
         out_csv = RAW_DIR / f"dry_creek_watershed_ceden_{date.today():%Y-%m-%d}_{int(time.time())}.csv.gz"
     data.to_csv(out_csv, index=False, compression="gzip")
     field = data[data["Parameter"].notna()]
