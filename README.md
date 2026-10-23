@@ -53,6 +53,27 @@ python3 download_esmr_usgs_history.py usgs     # just USGS
 
 These save to `Raw_data/esmr/` and `Raw_data/usgs/`. The **Historical Analysis** tab lets you pick any combination of CEDEN, eSMR (Dry Creek WWTP, Pleasant Grove WWTP), and USGS. DCC's own JBDC01/JBDC02 sampling stays on the monitoring tabs.
 
+## 🧩 How the code is organized
+
+```
+waterquality.py              entry point, just wires things together
+dcc_dashboard/
+  data.py                    loads the field/lab data + partner uploads -> `ctx`
+  shared.py                  thresholds, charts, PDF + CEDEN export helpers
+  banner.py                  salmon event QR box
+  sidebar.py                 tab picker + quick guide
+  tabs/
+    __init__.py              list of every tab (key -> label -> file)
+    overview.py, dcc_mission.py, creek_detail.py (Dry creek + Miners Ravine), monitoring_sites.py,
+    comparative.py, correlation.py, downloads.py, edna.py, simulation.py, upload.py, historical.py
+site_data_store.py           partner upload checks + saving (GitHub)
+download_*.py                historical data downloaders (also run from the command line)
+```
+
+**Adding a new tab:** make `dcc_dashboard/tabs/my_tab.py` with a `def render(ctx):` function and add a line to `TABS` in `tabs/__init__.py` (that list is also the sidebar order). `ctx` has `data`, `miners_ravine`, `dry_creek`, `all_samples`, `sites_df`, `qpcr`.
+
+The salmon event details (name, date, link) are at the top of `dcc_dashboard/banner.py`.
+
 ## 📍 Adding partner data (new sites or more samples)
 
 The **📤 Upload Data** tab has two modes:
